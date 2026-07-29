@@ -1,0 +1,6 @@
+{
+  "name": "像素太空卡牌 RTS",
+  "description": "一款可多人联机、由服务端权威运行的 2D 俯视角像素风太空卡牌即时战略游戏。玩家通过卡牌部署飞船、争夺资源星球，体验极致的太空博弈与战术指挥。",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
