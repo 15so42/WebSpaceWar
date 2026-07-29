@@ -1553,7 +1553,7 @@ export default function SpaceBattlefield({
         }
 
         // Faction-colored high-tech orbital occupation rings
-        if (pl.ownerId && pl.captureProgress === 100) {
+        if (pl.ownerId && pl.captureProgress === 100 && pl.type !== PlanetType.HOME) {
           const owner = state.players[pl.ownerId];
           if (owner) {
             const ringCol = hexToRgba(owner.factionId, 0.45);
