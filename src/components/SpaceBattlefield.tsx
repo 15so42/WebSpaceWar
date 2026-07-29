@@ -270,12 +270,16 @@ function getPlanetStyleConfig(planet: Planet, ownerColor?: string) {
   let ringColor = 'rgba(56, 189, 248, 0)';
   let atmosphereColor = 'rgba(14, 165, 233, 0.25)';
 
-  // Deterministic planet visual radius (sizes from small 16px to large 34px)
-  let radius = 24;
+  // Majestic size hierarchy for important strategic hubs
+  let radius = 26;
   if (planet.type === PlanetType.HOME) {
-    radius = Math.floor(26 + rand() * 8); // 26 to 34 pixels
+    radius = Math.floor(45 + rand() * 10); // 45 to 55 pixels: huge majestic capitals!
+  } else if (planet.name === '奥瑞恩中心晶矿') {
+    radius = Math.floor(36 + rand() * 8); // 36 to 44 pixels: giant highly contested crystal star!
+  } else if (planet.type === PlanetType.RESOURCE || planet.type === PlanetType.SPECIAL) {
+    radius = Math.floor(25 + rand() * 8); // 25 to 33 pixels: significant resource nodes
   } else {
-    radius = Math.floor(15 + rand() * 14); // 15 to 29 pixels
+    radius = Math.floor(18 + rand() * 6); // 18 to 24 pixels: smaller tactical outposts
   }
 
   if (planet.type === PlanetType.HOME) {
@@ -1082,19 +1086,23 @@ const generateBackgroundAssets = (): { stars: BackgroundStar[]; nebulae: Backgro
 
   // Giant colorful cosmic gas clouds (nebulae)
   const nebulaColors = [
-    'rgba(49, 46, 129, 0.22)',  // Indigo
-    'rgba(76, 29, 149, 0.18)',  // Purple
-    'rgba(13, 148, 136, 0.14)', // Teal
-    'rgba(190, 24, 74, 0.14)',  // Deep Pink
-    'rgba(15, 23, 42, 0.4)',    // Dust cloud blocking light
+    'rgba(29, 78, 216, 0.16)',  // Sapphire Blue
+    'rgba(124, 58, 237, 0.14)', // Royal Purple
+    'rgba(6, 182, 212, 0.10)',  // Electric Cyan/Teal
+    'rgba(219, 39, 119, 0.09)', // Magenta Dust
+    'rgba(3, 7, 18, 0.40)',     // Cosmic void dark dust cloud (creates silhouettes!)
+    'rgba(37, 99, 235, 0.12)',  // Cobalt Blue
+    'rgba(109, 40, 217, 0.11)', // Violet Glimmer
   ];
-  for (let i = 0; i < 6; i++) {
+  // Generate 12 overlapping nebulae for deep volumetric layering
+  for (let i = 0; i < 12; i++) {
+    const depth = 0.03 + (i % 3) * 0.05; // 0.03, 0.08, 0.13 for multi-level parallax depth
     nebulae.push({
-      x: rand(),
-      y: rand(),
-      radius: 200 + rand() * 250,
+      x: rand() * 1.4 - 0.2, // extend beyond edges for panning support
+      y: rand() * 1.4 - 0.2,
+      radius: 250 + rand() * 300,
       color: nebulaColors[i % nebulaColors.length],
-      depth: 0.08,
+      depth,
     });
   }
 
@@ -1343,8 +1351,19 @@ export default function SpaceBattlefield({
       // Update global zoom reference for 3D projections on each frame
       globalCurrentZoom = zoom;
 
-      // Clear with deep space backdrop
-      ctx.fillStyle = '#010206';
+      // Clear with deep space backdrop gradient (deep navy to dark space indigo)
+      const spaceGrad = ctx.createRadialGradient(
+        canvas.width / 2,
+        canvas.height / 2,
+        10,
+        canvas.width / 2,
+        canvas.height / 2,
+        canvas.width * 0.95
+      );
+      spaceGrad.addColorStop(0, '#040714');   // subtle dark navy core
+      spaceGrad.addColorStop(0.5, '#020308'); // fades out
+      spaceGrad.addColorStop(1, '#000103');   // pitch black outer depth
+      ctx.fillStyle = spaceGrad;
       ctx.fillRect(0, 0, canvas.width, canvas.height);
 
       // --- PARALLAX BACKGROUND DRAWING ---
@@ -1398,30 +1417,97 @@ export default function SpaceBattlefield({
       ctx.globalAlpha = 1.0;
 
       // --- 3D ENVIRONMENT GEOMETRIES ---
+      // 2.5. Draw Faint Curved Connection Lanes (Shipping routes) between adjacent planets
+      const drawnPairs = new Set<string>();
+      const planetList = Object.values(state.planets);
+      for (let i = 0; i < planetList.length; i++) {
+        for (let j = i + 1; j < planetList.length; j++) {
+          const pl1 = planetList[i];
+          const pl2 = planetList[j];
+          const dx = pl1.x - pl2.x;
+          const dy = pl1.y - pl2.y;
+          const dist = Math.sqrt(dx * dx + dy * dy);
+          
+          if (dist < 360) {
+            const pairId = pl1.id < pl2.id ? `${pl1.id}_${pl2.id}` : `${pl2.id}_${pl1.id}`;
+            if (!drawnPairs.has(pairId)) {
+              drawnPairs.add(pairId);
+              
+              // Draw an elegant curved tactical connection route
+              ctx.strokeStyle = 'rgba(255, 255, 255, 0.05)';
+              ctx.lineWidth = 1.2;
+              ctx.beginPath();
+              
+              const steps = 24;
+              const px = -(pl2.y - pl1.y) / dist;
+              const py = (pl2.x - pl1.x) / dist;
+              const curveIntensity = 30 * (dist / 300); 
+              
+              for (let k = 0; k <= steps; k++) {
+                const t = k / steps;
+                const lx = pl1.x + (pl2.x - pl1.x) * t;
+                const ly = pl1.y + (pl2.y - pl1.y) * t;
+                const disp = Math.sin(t * Math.PI) * curveIntensity;
+                const wx = lx + px * disp;
+                const wy = ly + py * disp;
+                
+                const proj = projectPoint(wx, wy, 0, camFocus, canvas.width, canvas.height);
+                if (k === 0) ctx.moveTo(proj.x, proj.y);
+                else ctx.lineTo(proj.x, proj.y);
+              }
+              ctx.stroke();
+            }
+          }
+        }
+      }
+
       // 3. Draw 3D Arching Flight Routes in Hyperspace
       Object.values(state.ships).forEach((sh) => {
         if (sh.state === ShipState.MOVING && sh.targetPlanetId) {
           const src = state.planets[sh.planetId];
           const tgt = state.planets[sh.targetPlanetId];
           if (src && tgt) {
-            ctx.strokeStyle = sh.ownerId === playerId ? 'rgba(99, 102, 241, 0.38)' : 'rgba(239, 68, 68, 0.32)';
-            ctx.lineWidth = 1.8;
-            ctx.setLineDash([5, 4]);
+            const dx = src.x - tgt.x;
+            const dy = src.y - tgt.y;
+            const dist = Math.sqrt(dx * dx + dy * dy);
+            
+            ctx.strokeStyle = sh.ownerId === playerId ? 'rgba(59, 130, 246, 0.25)' : 'rgba(239, 68, 68, 0.22)';
+            ctx.lineWidth = 2.0;
             ctx.beginPath();
-
+            
             const steps = 28;
+            const px = -(tgt.y - src.y) / dist;
+            const py = (tgt.x - src.x) / dist;
+            const curveIntensity = 30 * (dist / 300);
+
             for (let i = 0; i <= steps; i++) {
               const p = i / steps;
-              const wx = src.x + (tgt.x - src.x) * p;
-              const wy = src.y + (tgt.y - src.y) * p;
-              const wz = 60 * Math.sin(Math.PI * p); // arched peak on Z-axis
+              const lx = src.x + (tgt.x - src.x) * p;
+              const ly = src.y + (tgt.y - src.y) * p;
+              const disp = Math.sin(p * Math.PI) * curveIntensity;
+              const wx = lx + px * disp;
+              const wy = ly + py * disp;
+              const wz = 60 * Math.sin(Math.PI * p);
 
               const proj = projectPoint(wx, wy, wz, camFocus, canvas.width, canvas.height);
               if (i === 0) ctx.moveTo(proj.x, proj.y);
               else ctx.lineTo(proj.x, proj.y);
             }
             ctx.stroke();
-            ctx.setLineDash([]);
+            
+            const tOffset = (Date.now() * 0.001) % 1.0;
+            const lx_p = src.x + (tgt.x - src.x) * tOffset;
+            const ly_p = src.y + (tgt.y - src.y) * tOffset;
+            const disp_p = Math.sin(tOffset * Math.PI) * curveIntensity;
+            const wx_p = lx_p + px * disp_p;
+            const wy_p = ly_p + py * disp_p;
+            const wz_p = 60 * Math.sin(Math.PI * tOffset);
+            
+            const projPulse = projectPoint(wx_p, wy_p, wz_p, camFocus, canvas.width, canvas.height);
+            ctx.fillStyle = sh.ownerId === playerId ? '#60a5fa' : '#f87171';
+            ctx.beginPath();
+            ctx.arc(projPulse.x, projPulse.y, 2.5 * projPulse.scale, 0, Math.PI * 2);
+            ctx.fill();
           }
         }
       });
@@ -1466,7 +1552,53 @@ export default function SpaceBattlefield({
           );
         }
 
-        // Highlight solid outer border if owned (removed as requested)
+        // Faction-colored high-tech orbital occupation rings
+        if (pl.ownerId && pl.captureProgress === 100) {
+          const owner = state.players[pl.ownerId];
+          if (owner) {
+            const ringCol = hexToRgba(owner.factionId, 0.45);
+            const pulseSize = Math.sin(Date.now() * 0.003) * 1.2;
+            
+            // The first ring: thin, dashed, and pulsing
+            draw3DFlatCircle(
+              ctx,
+              pl.x,
+              pl.y,
+              radius + 6 + pulseSize,
+              camFocus,
+              canvas.width,
+              canvas.height,
+              ringCol,
+              1.0,
+              [4, 4]
+            );
+            
+            // The second ring: solid, very faint outer envelope
+            draw3DFlatCircle(
+              ctx,
+              pl.x,
+              pl.y,
+              radius + 7.5,
+              camFocus,
+              canvas.width,
+              canvas.height,
+              hexToRgba(owner.factionId, 0.15),
+              0.5
+            );
+            
+            // Draw little rotating technical telemetry nodes on the orbit line
+            const angleTick = (Date.now() * 0.0006) % (Math.PI * 2);
+            for (let i = 0; i < 4; i++) {
+              const tickAngle = angleTick + (i * Math.PI / 2);
+              const tx = pl.x + Math.cos(tickAngle) * (radius + 6 + pulseSize);
+              const ty = pl.y + Math.sin(tickAngle) * (radius + 6 + pulseSize);
+              const projTick = projectPoint(tx, ty, 0, camFocus, canvas.width, canvas.height);
+              
+              ctx.fillStyle = owner.factionId;
+              ctx.fillRect(Math.floor(projTick.x - 1.5), Math.floor(projTick.y - 1.5), 3, 3);
+            }
+          }
+        }
 
         // Play card target indicator
         if (selectedCardId && isHovered) {
@@ -1476,25 +1608,70 @@ export default function SpaceBattlefield({
         // RENDER the 3D Procedural Multi-layered Planet Sphere
         draw3DPlanetWithLayers(ctx, pl, camFocus, canvas.width, canvas.height, planetColor, isHovered);
 
-        // Name & Label details
+        // Name & Label details in high-readability tactical container cards
+        let tag = '';
+        let tagColor = '#94a3b8';
+        if (pl.type === PlanetType.HOME) {
+          tag = ' [母星]';
+          tagColor = '#60a5fa';
+        } else if (pl.type === PlanetType.RESOURCE) {
+          tag = pl.subType === PlanetSubType.MINERAL ? ' [晶矿]' : ' [科技]';
+          tagColor = '#fbbf24';
+        } else if (pl.type === PlanetType.SPECIAL) {
+          tag = pl.subType === PlanetSubType.HEAL ? ' [医疗]' : ' [重磁]';
+          tagColor = '#34d399';
+        } else {
+          tag = ' [前哨]';
+          tagColor = '#94a3b8';
+        }
+        
+        ctx.font = 'bold 11px monospace';
+        const displayName = pl.name;
+        const textWidthName = ctx.measureText(displayName).width;
+        ctx.font = 'bold 9px monospace';
+        const textWidthTag = ctx.measureText(tag).width;
+        const totalWidth = textWidthName + textWidthTag + 8;
+        
+        // Draw a neat dark glassmorphic label badge for maximum contrast
+        ctx.fillStyle = 'rgba(8, 12, 28, 0.76)';
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.10)';
+        ctx.lineWidth = 1;
+        
+        const pillX = projPl.x - totalWidth / 2;
+        const pillY = projPl.y + visualRadius + 7;
+        const pillW = totalWidth;
+        const pillH = 26;
+        
+        ctx.beginPath();
+        ctx.roundRect(pillX, pillY, pillW, pillH, 4);
+        ctx.fill();
+        ctx.stroke();
+        
+        // Write the name
+        ctx.textAlign = 'left';
         ctx.fillStyle = '#ffffff';
         ctx.font = 'bold 11px monospace';
-        ctx.textAlign = 'center';
-        ctx.fillText(pl.name, projPl.x, projPl.y + visualRadius + 16);
-
+        ctx.fillText(displayName, pillX + 4, pillY + 11);
+        
+        // Write the category tag
+        ctx.fillStyle = tagColor;
+        ctx.font = 'bold 9px monospace';
+        ctx.fillText(tag, pillX + 4 + textWidthName, pillY + 11);
+        
+        // Write sub-details on second row
         ctx.font = '9px sans-serif';
         if (pl.type === PlanetType.HOME) {
-          ctx.fillStyle = pl.hp > 30 ? '#10b981' : '#f43f5e';
-          ctx.fillText(`生命: ${Math.floor(pl.hp)}%`, projPl.x, projPl.y + visualRadius + 27);
+          ctx.fillStyle = pl.hp > 30 ? '#34d399' : '#f87171';
+          ctx.fillText(`生命: ${Math.floor(pl.hp)}%`, pillX + 4, pillY + 22);
         } else if (pl.type === PlanetType.RESOURCE) {
-          ctx.fillStyle = '#f59e0b';
-          ctx.fillText(pl.subType === PlanetSubType.MINERAL ? '矿物资源星 💎' : '科技结晶星 🧬', projPl.x, projPl.y + visualRadius + 27);
+          ctx.fillStyle = '#fbbf24';
+          ctx.fillText(pl.subType === PlanetSubType.MINERAL ? '矿物资源 💎' : '科技结晶 🧬', pillX + 4, pillY + 22);
         } else if (pl.type === PlanetType.SPECIAL) {
           ctx.fillStyle = pl.subType === PlanetSubType.HEAL ? '#34d399' : '#38bdf8';
-          ctx.fillText(pl.subType === PlanetSubType.HEAL ? '医疗核心: 恢复HP' : '强磁核心: 充能盾', projPl.x, projPl.y + visualRadius + 27);
+          ctx.fillText(pl.subType === PlanetSubType.HEAL ? '医疗恢复 🩹' : '强磁重盾 🛡️', pillX + 4, pillY + 22);
         } else {
-          ctx.fillStyle = '#64748b';
-          ctx.fillText(pl.ownerId ? '前哨基地' : '无人废弃星', projPl.x, projPl.y + visualRadius + 27);
+          ctx.fillStyle = '#94a3b8';
+          ctx.fillText(pl.ownerId ? '帝国前哨 🚩' : '废弃据点 🪐', pillX + 4, pillY + 22);
         }
 
         // Spies status
@@ -1549,18 +1726,42 @@ export default function SpaceBattlefield({
           const tgt = state.planets[sh.targetPlanetId];
           if (src && tgt) {
             const p = sh.travelProgress;
-            wx = src.x + (tgt.x - src.x) * p;
-            wy = src.y + (tgt.y - src.y) * p;
+            const dx = src.x - tgt.x;
+            const dy = src.y - tgt.y;
+            const dist = Math.sqrt(dx * dx + dy * dy);
+            
+            // Linear interpolation base
+            const lx = src.x + (tgt.x - src.x) * p;
+            const ly = src.y + (tgt.y - src.y) * p;
+            
+            // Perpendicular curved displacement to follow connection lanes
+            const px = -(tgt.y - src.y) / dist;
+            const py = (tgt.x - src.x) / dist;
+            const curveIntensity = 30 * (dist / 300);
+            const disp = Math.sin(p * Math.PI) * curveIntensity;
+            
+            wx = lx + px * disp;
+            wy = ly + py * disp;
             wz = 60 * Math.sin(Math.PI * p); // arch peak on Z-axis
-            headingAngle = Math.atan2(tgt.y - src.y, tgt.x - src.x);
+            
+            // Numerical tangent calculation for accurate heading direction along the curve
+            const nextP = Math.min(1.0, p + 0.01);
+            const nlx = src.x + (tgt.x - src.x) * nextP;
+            const nly = src.y + (tgt.y - src.y) * nextP;
+            const ndisp = Math.sin(nextP * Math.PI) * curveIntensity;
+            const nwx = nlx + px * ndisp;
+            const nwy = nly + py * ndisp;
+            headingAngle = Math.atan2(nwy - wy, nwx - wx);
           }
         } else {
           // Stable orbit calculations
           const pl = state.planets[sh.planetId];
           if (pl) {
             const angle = Math.atan2(sh.y - pl.y, sh.x - pl.x);
-            const orbitRad =
-              sh.type === ShipType.SCOUT ? 34 : sh.type === ShipType.FRIGATE ? 44 : sh.type === ShipType.DREADNOUGHT ? 54 : 28;
+            // Dynamic orbit radius scaling relative to the planet's visual radius to prevent clipping
+            const plCache = planetCache[pl.id];
+            const pRadius = plCache ? plCache.style.radius : (pl.type === PlanetType.HOME ? 50 : 24);
+            const orbitRad = pRadius + (sh.type === ShipType.SCOUT ? 12 : sh.type === ShipType.FRIGATE ? 24 : sh.type === ShipType.DREADNOUGHT ? 36 : 10);
 
             const rx = Math.cos(angle) * orbitRad;
             const ry = Math.sin(angle) * orbitRad;

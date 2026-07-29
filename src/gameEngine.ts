@@ -69,25 +69,29 @@ export function createGame(
   const ships: Record<string, Ship> = {};
 
   const colors = [
-    '#10b981', // Emerald Green (Player 1)
-    '#f59e0b', // Amber/Gold (Player 2)
-    '#3b82f6', // Sapphire Blue (Player 3)
+    '#3b82f6', // Sapphire Blue (Player 1 / Friendly player)
+    '#ef4444', // Crimson Red (Player 2 / Enemy player)
+    '#10b981', // Emerald Green (Player 3)
     '#ec4899', // Rose Pink (Player 4)
     '#a855f7', // Purple (Player 5)
   ];
 
-  // Map out planet locations symmetrically based on player count
+  // Map out planet locations symmetrically for balanced RTS battlefield lanes
   const playerHomePositions = [
-    { x: 150, y: 150 },
-    { x: 1050, y: 650 },
-    { x: 1050, y: 150 },
-    { x: 150, y: 650 },
+    { x: 180, y: 400 },  // Player 1 (Left - Sapphire Blue base)
+    { x: 1020, y: 400 }, // Player 2 (Right - Crimson Red base)
+    { x: 600, y: 150 },  // Player 3 (Top - Emerald Green base)
+    { x: 600, y: 650 },  // Player 4 (Bottom - Rose Pink base)
   ];
+
+  const activeHomeIndices = new Set<number>();
 
   // Create Players and their Home Planets
   playersList.forEach((p, idx) => {
+    const homeIndex = idx % playerHomePositions.length;
+    activeHomeIndices.add(homeIndex);
     const factionId = colors[idx % colors.length];
-    const homePos = playerHomePositions[idx % playerHomePositions.length];
+    const homePos = playerHomePositions[homeIndex];
     const homePlanetId = generateId('planet_home');
 
     // Draw initial 5 cards (restricted to Stage 1 cards at start, since techPoints = 0)
@@ -132,14 +136,22 @@ export function createGame(
 
   // Generate generic resource and neutral planets
   const neutralPlanetsConfig = [
-    { name: '埃尔达矿星', x: 400, y: 250, type: PlanetType.RESOURCE, subType: PlanetSubType.MINERAL },
-    { name: '赛瑞斯科技星', x: 800, y: 550, type: PlanetType.RESOURCE, subType: PlanetSubType.TECH },
-    { name: '奥德赛中立星', x: 400, y: 550, type: PlanetType.NEUTRAL },
-    { name: '泰坦中立星', x: 800, y: 250, type: PlanetType.NEUTRAL },
-    { name: '塞拉菲姆温床', x: 600, y: 400, type: PlanetType.SPECIAL, subType: PlanetSubType.HEAL },
-    { name: '虚空护盾发生器', x: 600, y: 150, type: PlanetType.SPECIAL, subType: PlanetSubType.SHIELD },
-    { name: '仙女座气矿星', x: 600, y: 650, type: PlanetType.RESOURCE, subType: PlanetSubType.MINERAL },
+    { name: '奥瑞恩中心晶矿', x: 600, y: 400, type: PlanetType.RESOURCE, subType: PlanetSubType.MINERAL },
+    { name: '埃尔达矿星', x: 390, y: 230, type: PlanetType.RESOURCE, subType: PlanetSubType.MINERAL },
+    { name: '赛瑞斯科技星', x: 810, y: 570, type: PlanetType.RESOURCE, subType: PlanetSubType.TECH },
+    { name: '奥德赛中立星', x: 390, y: 570, type: PlanetType.NEUTRAL },
+    { name: '泰坦中立星', x: 810, y: 230, type: PlanetType.NEUTRAL },
+    { name: '左翼前哨哨所', x: 390, y: 400, type: PlanetType.NEUTRAL },
+    { name: '右翼前哨哨所', x: 810, y: 400, type: PlanetType.NEUTRAL },
   ];
+
+  // Fill in vacant home slots with beautiful strategic special hubs
+  if (!activeHomeIndices.has(2)) {
+    neutralPlanetsConfig.push({ name: '虚空护盾发生器', x: 600, y: 150, type: PlanetType.SPECIAL, subType: PlanetSubType.SHIELD });
+  }
+  if (!activeHomeIndices.has(3)) {
+    neutralPlanetsConfig.push({ name: '塞拉菲姆温床', x: 600, y: 650, type: PlanetType.SPECIAL, subType: PlanetSubType.HEAL });
+  }
 
   neutralPlanetsConfig.forEach((pConf, idx) => {
     const planetId = generateId('planet_neu');
