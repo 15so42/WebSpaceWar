@@ -110,16 +110,11 @@ export interface Ship {
   x: number; // visual x
   y: number; // visual y
   z?: number; // visual z
-  startX?: number; // departure x origin when dispatched
-  startY?: number; // departure y origin when dispatched
-  startZ?: number; // departure z origin when dispatched
-  lastUpdateMs?: number; // timestamp when travelProgress/position was last updated
   headingAngle?: number; // facing direction angle
-  orbitPhase?: number; // legacy orbital phase angle
-  orbitPhaseStart?: number; // initial orbital phase angle
-  orbitTimeStart?: number; // timestamp when orbitPhaseStart was recorded
+  // Chosen once when a ship reaches its target altitude. +1/-1 determines
+  // which way the continuous distance-guided flight circles the planet.
+  orbitDirection?: 1 | -1;
   speed: number;
-  travelProgress: number; // 0 to 1 (for interpolation if moving)
   spyDisguisedAs: PlayerId | null; // client view uses this if spy is disguised
 }
 
@@ -205,6 +200,8 @@ export interface RoomStateMessage {
   type: MessageType.ROOM_STATE;
   state: GameState;
   playerId: PlayerId;
+  /** Host wall-clock time at which this snapshot was emitted. Presentation only. */
+  serverTimeMs: number;
 }
 
 export interface JoinSuccessMessage {

@@ -11,6 +11,7 @@ import {
   PlanetType,
   PlanetSubType,
   ActiveEffect,
+  CardType,
 } from './types';
 import { CARD_DEFINITIONS, DECK_POOL } from './cardsData';
 
@@ -58,6 +59,18 @@ export const SHIP_CONFIGS = {
     desc: '间谍船：潜入敌占星系，窃取敌方矿物（使敌方每5秒-2矿物，我方+1矿物）。',
   },
 };
+
+function placeShipAtOrbitAltitude(sh: Ship, planet: Planet) {
+  let hash = 0;
+  for (let i = 0; i < sh.id.length; i++) hash = (hash * 31 + sh.id.charCodeAt(i)) & 0x7fffffff;
+  const angle = (hash % 360) * (Math.PI / 180);
+  const radius = getFlightOrbitRadius(sh, planet);
+  sh.x = planet.x + Math.cos(angle) * radius;
+  sh.y = planet.y + Math.sin(angle) * radius;
+  sh.z = 0;
+  sh.headingAngle = angle + Math.PI / 2;
+  sh.orbitDirection = 1;
+}
 
 // Initial state creation
 export function createGame(
@@ -234,9 +247,9 @@ export function createGame(
       x: pl.x + (Math.random() * 40 - 20),
       y: pl.y + (Math.random() * 40 - 20),
       speed: SHIP_CONFIGS[type].speed,
-      travelProgress: 0,
       spyDisguisedAs: null,
     };
+    placeShipAtOrbitAltitude(ships[shipId], pl);
   };
 
   // Spawn fleets on players' home planets - each starts with exactly ONE small exploration ship
@@ -301,6 +314,9 @@ export function playCard(
   const cardInst = player.hand[cardIdx];
   const def = CARD_DEFINITIONS[cardInst.definitionId];
   if (!def) throw new Error('未定义卡牌');
+  if (def.type === CardType.ABILITY) {
+    throw new Error('被动能力卡只要留在手牌中便会生效，不能主动施放');
+  }
 
   const costMinerals = getCardMineralCost(def.id, player);
   const costTech = def.costTech;
@@ -370,9 +386,9 @@ export function playCard(
         x: homePlanet.x + (Math.random() * 40 - 20),
         y: homePlanet.y + (Math.random() * 40 - 20),
         speed: SHIP_CONFIGS[ShipType.SCOUT].speed,
-        travelProgress: 0,
         spyDisguisedAs: null,
       };
+      placeShipAtOrbitAltitude(state.ships[shipId], homePlanet);
       state.logs.unshift(`${player.name} 建造了一艘 【探索船】`);
       break;
     }
@@ -393,9 +409,9 @@ export function playCard(
         x: homePlanet.x + (Math.random() * 50 - 25),
         y: homePlanet.y + (Math.random() * 50 - 25),
         speed: SHIP_CONFIGS[ShipType.FRIGATE].speed,
-        travelProgress: 0,
         spyDisguisedAs: null,
       };
+      placeShipAtOrbitAltitude(state.ships[shipId], homePlanet);
       state.logs.unshift(`${player.name} 建造了一艘 【护卫舰】 驻防母星`);
       break;
     }
@@ -416,9 +432,9 @@ export function playCard(
         x: homePlanet.x + (Math.random() * 40 - 20),
         y: homePlanet.y + (Math.random() * 40 - 20),
         speed: SHIP_CONFIGS[ShipType.DREADNOUGHT].speed,
-        travelProgress: 0,
         spyDisguisedAs: null,
       };
+      placeShipAtOrbitAltitude(state.ships[shipId], homePlanet);
       state.logs.unshift(`${player.name} 建造了强力主力战舰 【主力舰】`);
       break;
     }
@@ -439,9 +455,9 @@ export function playCard(
         x: homePlanet.x + (Math.random() * 40 - 20),
         y: homePlanet.y + (Math.random() * 40 - 20),
         speed: SHIP_CONFIGS[ShipType.SPY].speed,
-        travelProgress: 0,
         spyDisguisedAs: null,
       };
+      placeShipAtOrbitAltitude(state.ships[shipId], homePlanet);
       state.logs.unshift(`${player.name} 建造了一艘 【间谍船】。将其派遣到敌占星可以实施资源窃取。`);
       break;
     }
@@ -469,6 +485,7 @@ export function playCard(
       if (!targetPlanetId) throw new Error('【大清洗】 需要指定目标星球');
       const targetPl = state.planets[targetPlanetId];
       if (!targetPl) throw new Error('目标星球未找到');
+      if (targetPl.ownerId !== playerId) throw new Error('【大清洗】只能指定己方星球');
 
       // Purge all enemy disguised spies orbiting this planet
       let spiesPurged = 0;
@@ -520,6 +537,8 @@ export function dispatchFleet(
 
   if (!srcPlanet || !tgtPlanet) throw new Error('星球未找到');
   if (sourcePlanetId === targetPlanetId) throw new Error('出发地与目的地不能相同');
+  if (!Number.isInteger(count) || count < 1) throw new Error('派遣数量必须是正整数');
+  if (!Object.values(ShipType).includes(shipType)) throw new Error('无效的飞船类型');
 
   // Verify ownership or access
   if (srcPlanet.ownerId !== playerId) {
@@ -547,28 +566,14 @@ export function dispatchFleet(
     throw new Error(`无可支配的空闲飞船 (请求: ${count}, 空闲: ${idleShips.length})`);
   }
 
-  // Dispatched ships change to moving state, preserving current exact 3D position for direct orbital breakout
-  const nowMs = Date.now();
+  // Leaving a planet only changes the flight target. The same continuous
+  // steering controller turns the ship toward the next planet; no prebuilt
+  // transfer curve or separate exit animation is involved.
   const shipsToDispatch = idleShips.slice(0, count);
   shipsToDispatch.forEach((sh) => {
-    if (srcPlanet) {
-      const orbPos = computeShipOrbitPosition(sh, srcPlanet, nowMs);
-      sh.startX = orbPos.x;
-      sh.startY = orbPos.y;
-      sh.startZ = orbPos.z;
-      sh.headingAngle = orbPos.headingAngle;
-      sh.x = orbPos.x;
-      sh.y = orbPos.y;
-      sh.z = orbPos.z;
-    } else {
-      sh.startX = sh.x;
-      sh.startY = sh.y;
-      sh.startZ = sh.z || 0;
-    }
+    sh.orbitDirection = undefined;
     sh.state = ShipState.MOVING;
     sh.targetPlanetId = targetPlanetId;
-    sh.travelProgress = 0;
-    sh.lastUpdateMs = nowMs;
   });
 
   state.logs.unshift(
@@ -598,10 +603,6 @@ export function getPlanetRadius(planet: Planet): number {
 // Compute deterministic 3D orbit parameters per ship ID
 export interface OrbitParams {
   orbitRad: number;
-  nodeAngle: number;
-  incAngle: number;
-  dir: number;
-  orbitSpeed: number;
 }
 
 export function getShipOrbitParams(sh: Ship, planet: Planet): OrbitParams {
@@ -610,233 +611,124 @@ export function getShipOrbitParams(sh: Ship, planet: Planet): OrbitParams {
     hash = (hash * 31 + sh.id.charCodeAt(i)) & 0x7fffffff;
   }
 
-  const baseSpeed = sh.type === ShipType.SCOUT ? 0.0016 : sh.type === ShipType.SPY ? 0.0013 : sh.type === ShipType.FRIGATE ? 0.0009 : 0.0005;
-  const orbitSpeed = baseSpeed * (0.85 + (hash % 4) * 0.12);
-  const dir = (hash % 2 === 0) ? 1 : -1;
-
-  // Node angle (longitude of ascending node): golden ratio distribution 0 to 2PI
-  const nodeAngle = ((hash % 100) / 100) * Math.PI * 2;
-
   // Inclination angle: steep, varied 3D orbital planes (-65° to +65°)
-  const incDegPattern = [55, -40, 65, -30, 45, -55, 35, -65];
-  const incDeg = incDegPattern[hash % incDegPattern.length];
-  const incAngle = incDeg * (Math.PI / 180);
-
   const baseOffset = sh.type === ShipType.SCOUT ? 22 : sh.type === ShipType.FRIGATE ? 34 : sh.type === ShipType.DREADNOUGHT ? 48 : 18;
   const staggerOffset = (hash % 5) * 6 - 12;
   const pRadius = getPlanetRadius(planet);
   const orbitRad = Math.max(pRadius + 14, pRadius + baseOffset + staggerOffset);
-
-  return { orbitRad, nodeAngle, incAngle, dir, orbitSpeed };
+  // Angular velocity is derived from the ship's configured linear flight speed:
+  // tangential orbit speed (radius × angular velocity) equals its travel speed.
+  return { orbitRad };
 }
 
-export function getOrbitPosFromPhase(planet: Planet, params: OrbitParams, phi: number) {
-  const u = Math.cos(phi) * params.orbitRad;
-  const v = Math.sin(phi) * params.orbitRad;
-
-  const du = -params.dir * Math.sin(phi) * params.orbitRad;
-  const dv = params.dir * Math.cos(phi) * params.orbitRad;
-
-  // 1) Rotate by inclination (incAngle) around Y-axis
-  const x1 = u * Math.cos(params.incAngle);
-  const y1 = v;
-  const z1 = -u * Math.sin(params.incAngle);
-
-  const vx1 = du * Math.cos(params.incAngle);
-  const vy1 = dv;
-  const vz1 = -du * Math.sin(params.incAngle);
-
-  // 2) Rotate by node longitude (nodeAngle) around Z-axis
-  const x2 = x1 * Math.cos(params.nodeAngle) - y1 * Math.sin(params.nodeAngle);
-  const y2 = x1 * Math.sin(params.nodeAngle) + y1 * Math.cos(params.nodeAngle);
-  const z2 = z1;
-
-  const vx2 = vx1 * Math.cos(params.nodeAngle) - vy1 * Math.sin(params.nodeAngle);
-  const vy2 = vx1 * Math.sin(params.nodeAngle) + vy1 * Math.cos(params.nodeAngle);
-  const vz2 = vz1;
-
-  return {
-    x: planet.x + x2,
-    y: planet.y + y2,
-    z: z2,
-    velo3D: { x: vx2, y: vy2, z: vz2 },
-    headingAngle: Math.atan2(vy2, vx2),
-  };
+export function getShipTurnRate(sh: Ship): number {
+  // Radians per second. Halved so all ships describe broad, readable turns.
+  return sh.type === ShipType.SCOUT ? 1.75 : sh.type === ShipType.DREADNOUGHT ? 0.75 : 1.25;
 }
 
-export function getOrbitEntryAngle(sx: number, sy: number, sz: number, planet: Planet, params: OrbitParams): number {
-  const px = sx - planet.x;
-  const py = sy - planet.y;
-  const pz = sz - 0;
-
-  // Un-rotate nodeAngle around Z
-  const x1 = px * Math.cos(-params.nodeAngle) - py * Math.sin(-params.nodeAngle);
-  const y1 = px * Math.sin(-params.nodeAngle) + py * Math.cos(-params.nodeAngle);
-  const z1 = pz;
-
-  // Un-rotate incAngle around Y
-  const u_local = x1 * Math.cos(-params.incAngle) - z1 * Math.sin(-params.incAngle);
-  const v_local = y1;
-
-  return Math.atan2(v_local, u_local);
+function getFlightOrbitRadius(sh: Ship, planet: Planet) {
+  return getShipOrbitParams(sh, planet).orbitRad;
 }
 
-export function computeShipOrbitPosition(sh: Ship, planet: Planet, nowMs: number) {
-  const params = getShipOrbitParams(sh, planet);
-  if (sh.orbitPhaseStart === undefined || sh.orbitTimeStart === undefined) {
-    let hash = 0;
-    for (let i = 0; i < sh.id.length; i++) {
-      hash = (hash * 31 + sh.id.charCodeAt(i)) & 0x7fffffff;
-    }
-    const startPhase = ((hash % 360) * Math.PI) / 180;
-    sh.orbitPhaseStart = params.dir * startPhase;
-    sh.orbitTimeStart = nowMs;
+function ensureOrbitDirection(sh: Ship, planet: Planet) {
+  if (sh.orbitDirection !== undefined) return sh.orbitDirection;
+  const radialAngle = Math.atan2(sh.y - planet.y, sh.x - planet.x);
+  const forwardAngle = sh.headingAngle ?? radialAngle + Math.PI / 2;
+  const cross = Math.sin(forwardAngle - radialAngle);
+  sh.orbitDirection = cross === 0 ? 1 : cross > 0 ? 1 : -1;
+  return sh.orbitDirection;
+}
+
+// One continuous flight controller for both travel and orbiting. Once a ship
+// reaches the target altitude it does not snap onto a pre-authored orbit: its
+// own heading is continuously corrected inward when too high and outward when
+// too low, producing a natural circling path at the configured flight speed.
+function advanceDistanceGuidedFlight(sh: Ship, planet: Planet, dt: number, orbiting: boolean) {
+  const dx = sh.x - planet.x;
+  const dy = sh.y - planet.y;
+  const distance = Math.max(0.001, Math.hypot(dx, dy));
+  const radialAngle = Math.atan2(dy, dx);
+  let desiredHeading: number;
+
+  if (!orbiting) {
+    desiredHeading = Math.atan2(planet.y - sh.y, planet.x - sh.x);
+  } else {
+    const direction = ensureOrbitDirection(sh, planet);
+    const targetRadius = getFlightOrbitRadius(sh, planet);
+    const tangentHeading = radialAngle + direction * Math.PI / 2;
+    const altitudeError = (distance - targetRadius) / Math.max(1, targetRadius * 0.55);
+    const radialCorrection = Math.max(-0.8, Math.min(0.8, altitudeError));
+    // Above the desired altitude: turn inward. Below it: turn outward.
+    desiredHeading = tangentHeading + direction * radialCorrection;
   }
 
-  const elapsedMs = nowMs - sh.orbitTimeStart;
-  const currentPhase = sh.orbitPhaseStart + params.dir * params.orbitSpeed * elapsedMs;
-  return getOrbitPosFromPhase(planet, params, currentPhase);
+  sh.headingAngle = rotateTowards(
+    sh.headingAngle ?? desiredHeading,
+    desiredHeading,
+    getShipTurnRate(sh) * dt
+  );
+  sh.x += Math.cos(sh.headingAngle) * sh.speed * dt;
+  sh.y += Math.sin(sh.headingAngle) * sh.speed * dt;
+  sh.z = (sh.z || 0) * Math.max(0, 1 - dt * 1.5);
+}
+
+export function shortestAngleDiff(target: number, current: number): number {
+  let diff = target - current;
+  while (diff > Math.PI) diff -= Math.PI * 2;
+  while (diff < -Math.PI) diff += Math.PI * 2;
+  return diff;
+}
+
+export function rotateTowards(current: number, target: number, maxTurn: number): number {
+  const diff = shortestAngleDiff(target, current);
+  return Math.abs(diff) <= maxTurn ? target : current + Math.sign(diff) * maxTurn;
+}
+
+function completePlanetArrival(sh: Ship, target: Planet) {
+  sh.planetId = target.id;
+  sh.targetPlanetId = null;
+  sh.orbitDirection = undefined;
+  if (sh.type === ShipType.SPY) {
+    sh.state = ShipState.ORBIT;
+    if (target.ownerId && target.ownerId !== sh.ownerId) {
+      sh.spyDisguisedAs = target.ownerId;
+      const alreadyDebuffed = target.debuffs.some((d) => d.shipId === sh.id);
+      if (!alreadyDebuffed) target.debuffs.push({ id: generateId('debuff'), type: 'spy', ownerId: sh.ownerId, shipId: sh.id });
+    } else {
+      sh.spyDisguisedAs = null;
+    }
+  } else if (sh.type === ShipType.SCOUT) {
+    sh.state = target.type === PlanetType.RESOURCE && target.ownerId === sh.ownerId
+      ? ShipState.MINING
+      : target.ownerId !== sh.ownerId ? ShipState.CAPTURING : ShipState.ORBIT;
+  } else if (sh.type === ShipType.DREADNOUGHT) {
+    sh.state = target.ownerId !== sh.ownerId ? ShipState.CAPTURING : ShipState.ORBIT;
+  } else {
+    sh.state = ShipState.ORBIT;
+  }
 }
 
 // Run a full simulation frame
 export function tickGame(state: GameState, dt: number): GameState {
   if (state.gameOver) return state;
 
-  const nowMs = Date.now();
-
-  // 1. Update ship positions, travel status, steering physics, and orbital movement
+  // 1. One continuous distance-guided flight simulation for travel and orbiting.
   Object.values(state.ships).forEach((sh) => {
     if (sh.state === ShipState.MOVING && sh.targetPlanetId) {
-      const srcPl = state.planets[sh.planetId];
       const tgtPl = state.planets[sh.targetPlanetId];
 
       if (tgtPl) {
-        let sx = sh.startX;
-        let sy = sh.startY;
-        let sz = sh.startZ;
-
-        if (sx === undefined || sy === undefined || sz === undefined) {
-          if (srcPl) {
-            const orbPos = computeShipOrbitPosition(sh, srcPl, nowMs);
-            sx = orbPos.x;
-            sy = orbPos.y;
-            sz = orbPos.z;
-            sh.startX = sx;
-            sh.startY = sy;
-            sh.startZ = sz;
-          } else {
-            sx = sh.x;
-            sy = sh.y;
-            sz = sh.z || 0;
-          }
-        }
-
-        const params = getShipOrbitParams(sh, tgtPl);
-        const entryAngle = getOrbitEntryAngle(sx, sy, sz, tgtPl, params);
-        const entryPos = getOrbitPosFromPhase(tgtPl, params, entryAngle);
-
-        const dx = entryPos.x - sx;
-        const dy = entryPos.y - sy;
-        const dz = entryPos.z - sz;
-        const dist = Math.hypot(dx, dy, dz);
-
-        if (dist > 0) {
-          sh.travelProgress += (sh.speed * dt) / dist;
-          sh.lastUpdateMs = nowMs;
-
-          if (sh.travelProgress >= 1.0) {
-            // Arrived! Join orbit seamlessly
-            sh.planetId = sh.targetPlanetId;
-            sh.targetPlanetId = null;
-            sh.travelProgress = 0;
-            sh.startX = undefined;
-            sh.startY = undefined;
-            sh.startZ = undefined;
-
-            sh.orbitPhaseStart = entryAngle;
-            sh.orbitTimeStart = nowMs;
-            sh.x = entryPos.x;
-            sh.y = entryPos.y;
-            sh.z = entryPos.z;
-            sh.headingAngle = entryPos.headingAngle;
-
-            // Determine arrived state
-            if (sh.type === ShipType.SPY) {
-              sh.state = ShipState.ORBIT;
-              if (tgtPl.ownerId && tgtPl.ownerId !== sh.ownerId) {
-                sh.spyDisguisedAs = tgtPl.ownerId;
-                const alreadyDebuffed = tgtPl.debuffs.some((d) => d.shipId === sh.id);
-                if (!alreadyDebuffed) {
-                  tgtPl.debuffs.push({
-                    id: generateId('debuff'),
-                    type: 'spy',
-                    ownerId: sh.ownerId,
-                    shipId: sh.id,
-                  });
-                }
-              } else {
-                sh.spyDisguisedAs = null;
-              }
-            } else if (sh.type === ShipType.SCOUT) {
-              if (tgtPl.type === PlanetType.RESOURCE && tgtPl.ownerId === sh.ownerId) {
-                sh.state = ShipState.MINING;
-              } else if (tgtPl.ownerId !== sh.ownerId) {
-                sh.state = ShipState.CAPTURING;
-              } else {
-                sh.state = ShipState.ORBIT;
-              }
-            } else if (sh.type === ShipType.DREADNOUGHT) {
-              if (tgtPl.ownerId !== sh.ownerId) {
-                sh.state = ShipState.CAPTURING;
-              } else {
-                sh.state = ShipState.ORBIT;
-              }
-            } else {
-              sh.state = ShipState.ORBIT;
-            }
-          } else {
-            // Interpolate coordinates in 3D directly to orbit insertion point
-            const p = sh.travelProgress;
-            sh.x = sx + dx * p;
-            sh.y = sy + dy * p;
-            sh.z = sz + dz * p + Math.sin(Math.PI * p) * Math.min(30, dist * 0.1);
-
-            // Facing angle steering: turn smoothly from current heading toward target angle with max turn rate
-            const approachAngle = Math.atan2(dy, dx);
-            let desiredAngle = approachAngle;
-            if (p >= 0.7) {
-              const blend = (p - 0.7) / 0.3;
-              let diff = entryPos.headingAngle - approachAngle;
-              while (diff > Math.PI) diff -= Math.PI * 2;
-              while (diff < -Math.PI) diff += Math.PI * 2;
-              desiredAngle = approachAngle + diff * blend;
-            }
-
-            const currentHeading = sh.headingAngle ?? desiredAngle;
-            let angleDiff = desiredAngle - currentHeading;
-            while (angleDiff > Math.PI) angleDiff -= Math.PI * 2;
-            while (angleDiff < -Math.PI) angleDiff += Math.PI * 2;
-
-            const turnRate = sh.type === ShipType.SCOUT ? 3.5 : sh.type === ShipType.DREADNOUGHT ? 1.5 : 2.5;
-            const maxTurn = turnRate * dt;
-
-            if (Math.abs(angleDiff) <= maxTurn) {
-              sh.headingAngle = desiredAngle;
-            } else {
-              sh.headingAngle = currentHeading + Math.sign(angleDiff) * maxTurn;
-            }
-          }
-        }
+        advanceDistanceGuidedFlight(sh, tgtPl, dt, false);
+        const targetRadius = getFlightOrbitRadius(sh, tgtPl);
+        const distance = Math.hypot(sh.x - tgtPl.x, sh.y - tgtPl.y);
+        if (distance <= targetRadius + sh.speed * dt * 1.25) completePlanetArrival(sh, tgtPl);
       }
     } else {
-      // Deterministic 3D orbit rotation
+      // At the target altitude, the same controller steers high ships inward
+      // and low ships outward around the planet.
       const pl = state.planets[sh.planetId];
       if (pl) {
-        const orbPos = computeShipOrbitPosition(sh, pl, nowMs);
-        sh.x = orbPos.x;
-        sh.y = orbPos.y;
-        sh.z = orbPos.z;
-        sh.headingAngle = orbPos.headingAngle;
+        advanceDistanceGuidedFlight(sh, pl, dt, true);
       }
     }
   });

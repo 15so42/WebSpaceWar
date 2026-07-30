@@ -4,8 +4,10 @@ import LobbyScreen from './components/LobbyScreen';
 import SpaceBattlefield from './components/SpaceBattlefield';
 import CardDeck from './components/CardDeck';
 import { Play, LogOut, RefreshCw, Sparkles, LogIn, AlertCircle } from 'lucide-react';
+import { createGame, dispatchFleet as dispatchFleetRule, generateId, playCard as playCardRule, runBotAI, tickGame } from './gameEngine';
 
 const PROTOCOL_VERSION = '1.0.0';
+type SessionMode = 'online' | 'offline' | null;
 
 export default function App() {
   // Profiles
@@ -29,6 +31,8 @@ export default function App() {
   // Network State
   const [lobbies, setLobbies] = useState<LobbyInfo[]>([]);
   const [roomState, setRoomState] = useState<GameState | null>(null);
+  const [serverTimeMs, setServerTimeMs] = useState<number | null>(null);
+  const [sessionMode, setSessionMode] = useState<SessionMode>(null);
   const [isConnected, setIsConnected] = useState(false);
   const [isDisconnectedExplicitly, setIsDisconnectedExplicitly] = useState(false);
   const [errorToast, setErrorToast] = useState<string | null>(null);
@@ -37,6 +41,9 @@ export default function App() {
   const [selectedCardId, setSelectedCardId] = useState<string | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
+  const sessionModeRef = useRef<SessionMode>(sessionMode);
+  const offlineStateRef = useRef<GameState | null>(null);
+  const offlineBotTickRef = useRef(0);
 
   // Keep references to prevent stale closures in WebSocket event handlers
   const roomStateRef = useRef(roomState);
@@ -47,6 +54,10 @@ export default function App() {
   useEffect(() => {
     roomStateRef.current = roomState;
   }, [roomState]);
+
+  useEffect(() => {
+    sessionModeRef.current = sessionMode;
+  }, [sessionMode]);
 
   useEffect(() => {
     roomIdRef.current = roomId;
@@ -62,6 +73,7 @@ export default function App() {
 
   // 1. Establish WebSocket Connection
   const connectWS = () => {
+    if (sessionModeRef.current === 'offline') return;
     if (wsRef.current) {
       wsRef.current.close();
     }
@@ -78,6 +90,7 @@ export default function App() {
       setIsConnected(true);
       setIsDisconnectedExplicitly(false);
       setErrorToast(null);
+      setSessionMode('online');
 
       // If we were already in a room, send auto-rejoin command
       if (roomStateRef.current) {
@@ -103,6 +116,7 @@ export default function App() {
             break;
           case MessageType.ROOM_STATE:
             setRoomState(msg.state);
+            setServerTimeMs(msg.serverTimeMs);
             break;
           case MessageType.JOIN_SUCCESS:
             console.log(`Joined room successfully: ${msg.roomId}`);
@@ -121,6 +135,7 @@ export default function App() {
     socket.onclose = () => {
       if (wsRef.current !== socket) return;
       setIsConnected(false);
+      if (sessionModeRef.current === 'offline') return;
       // Guidelines: Client 断线后不得自动重连，必须询问玩家是否恢复对局
       setIsDisconnectedExplicitly(true);
     };
@@ -149,13 +164,122 @@ export default function App() {
     }, 5000);
   };
 
+  const commitOfflineState = (state: GameState, publishToReact = true) => {
+    offlineStateRef.current = state;
+    roomStateRef.current = state;
+    if (publishToReact) {
+      setRoomState(structuredClone(state));
+      setServerTimeMs(Date.now());
+    }
+  };
+
+  const startSinglePlayer = () => {
+    const commanderName = playerName.trim() || '本地指挥官';
+    const localRoomId = `OFFLINE_${Date.now().toString(36).toUpperCase()}`;
+    const players = [
+      { id: playerId, name: commanderName, isBot: false },
+      ...Array.from({ length: 3 }, (_, index) => ({
+        id: generateId(`offline_bot_${index + 1}`),
+        name: `AI 掠夺者 #${index + 1}`,
+        isBot: true,
+      })),
+    ];
+
+    sessionModeRef.current = 'offline';
+    setSessionMode('offline');
+    setIsDisconnectedExplicitly(false);
+    setIsConnected(false);
+    setLobbies([]);
+    offlineBotTickRef.current = 0;
+    commitOfflineState(createGame(localRoomId, players));
+    setRoomId('OFFLINE');
+    setSelectedCardId(null);
+    wsRef.current?.close();
+    wsRef.current = null;
+  };
+
+  useEffect(() => {
+    if (sessionMode !== 'offline') return;
+
+    // Single-player has no remote Host to synchronize with. Advance its source
+    // of truth at render cadence, while publishing UI-only snapshots at 10 Hz.
+    // The battlefield reads offlineStateRef directly, so ship positions never
+    // wait for a 50 ms React state update.
+    const fixedStep = 1 / 60;
+    const uiPublishIntervalMs = 100;
+    let animationFrameId = 0;
+    let lastFrameMs = performance.now();
+    let accumulatedSeconds = 0;
+    let lastUiPublishMs = 0;
+
+    const runOfflineBots = (state: GameState) => {
+      offlineBotTickRef.current += fixedStep;
+      if (offlineBotTickRef.current < 2.4) return state;
+      offlineBotTickRef.current = 0;
+
+      let nextState = state;
+      Object.values(nextState.players).forEach((player) => {
+        if (!player.isBot || !player.isAlive) return;
+        const command = runBotAI(nextState, player.id);
+        if (!command) return;
+        try {
+          if (command.type === CommandType.PLAY_CARD) {
+            nextState = playCardRule(nextState, player.id, command.cardInstanceId, command.targetPlanetId);
+          } else if (command.type === CommandType.DISPATCH_FLEET) {
+            nextState = dispatchFleetRule(
+              nextState,
+              player.id,
+              command.sourcePlanetId,
+              command.targetPlanetId,
+              command.shipType,
+              command.count
+            );
+          }
+        } catch {
+          // A local AI may choose an action that is no longer legal after another AI acted this tick.
+        }
+      });
+      return nextState;
+    };
+
+    const advanceSinglePlayer = (nowMs: number) => {
+      const elapsedSeconds = Math.min(0.1, Math.max(0, (nowMs - lastFrameMs) / 1000));
+      lastFrameMs = nowMs;
+      accumulatedSeconds += elapsedSeconds;
+
+      let steps = 0;
+      while (accumulatedSeconds >= fixedStep && steps < 6) {
+        const state = offlineStateRef.current;
+        if (!state || state.gameOver) break;
+        let nextState = tickGame(state, fixedStep);
+        nextState = runOfflineBots(nextState);
+        commitOfflineState(nextState, false);
+        accumulatedSeconds -= fixedStep;
+        steps++;
+      }
+      if (steps === 6) accumulatedSeconds = 0;
+
+      const currentState = offlineStateRef.current;
+      if (currentState && nowMs - lastUiPublishMs >= uiPublishIntervalMs) {
+        setRoomState(structuredClone(currentState));
+        setServerTimeMs(Date.now());
+        lastUiPublishMs = nowMs;
+      }
+      animationFrameId = requestAnimationFrame(advanceSinglePlayer);
+    };
+
+    animationFrameId = requestAnimationFrame(advanceSinglePlayer);
+    return () => cancelAnimationFrame(animationFrameId);
+  }, [sessionMode]);
+
   // 2. Client Command Helpers
-  const joinRoom = () => {
+  const joinRoom = (requestedRoomId?: string) => {
+    if (sessionModeRef.current === 'offline') return;
     if (!isConnected) {
       showError('服务器未连接，无法加入。');
       return;
     }
-    const cleanRoomId = roomId.trim().toUpperCase() || 'ALPHA';
+    const cleanRoomId = (requestedRoomId ?? roomId).trim().toUpperCase() || 'ALPHA';
     setRoomId(cleanRoomId);
 
     wsRef.current?.send(
@@ -178,11 +302,33 @@ export default function App() {
   };
 
   const leaveRoom = () => {
+    if (sessionModeRef.current === 'offline') {
+      offlineStateRef.current = null;
+      offlineBotTickRef.current = 0;
+      sessionModeRef.current = null;
+      setSessionMode(null);
+      setRoomState(null);
+      setSelectedCardId(null);
+      return;
+    }
+
     wsRef.current?.send(JSON.stringify({ type: CommandType.LEAVE_ROOM }));
     setRoomState(null);
+    setSessionMode(null);
   };
 
   const playCardDirect = (cardInstanceId: string) => {
+    if (sessionModeRef.current === 'offline') {
+      const state = offlineStateRef.current;
+      if (!state) return;
+      try {
+        commitOfflineState(playCardRule(state, playerId, cardInstanceId));
+      } catch (err: any) {
+        showError(err.message || '卡牌施放失败');
+      }
+      return;
+    }
+
     wsRef.current?.send(
       JSON.stringify({
         type: CommandType.PLAY_CARD,
@@ -193,6 +339,18 @@ export default function App() {
 
   const playCardTarget = (planetId: string) => {
     if (!selectedCardId) return;
+    if (sessionModeRef.current === 'offline') {
+      const state = offlineStateRef.current;
+      if (!state) return;
+      try {
+        commitOfflineState(playCardRule(state, playerId, selectedCardId, planetId));
+      } catch (err: any) {
+        showError(err.message || '卡牌施放失败');
+      }
+      setSelectedCardId(null);
+      return;
+    }
+
     wsRef.current?.send(
       JSON.stringify({
         type: CommandType.PLAY_CARD,
@@ -209,6 +367,17 @@ export default function App() {
     shipType: ShipType,
     count: number
   ) => {
+    if (sessionModeRef.current === 'offline') {
+      const state = offlineStateRef.current;
+      if (!state) return;
+      try {
+        commitOfflineState(dispatchFleetRule(state, playerId, sourcePlanetId, targetPlanetId, shipType, count));
+      } catch (err: any) {
+        showError(err.message || '舰队派遣失败');
+      }
+      return;
+    }
+
     wsRef.current?.send(
       JSON.stringify({
         type: CommandType.DISPATCH_FLEET,
@@ -236,7 +405,7 @@ export default function App() {
       )}
 
       {/* 2. Disconnect Session Recovery Prompt Modal */}
-      {isDisconnectedExplicitly && (
+      {isDisconnectedExplicitly && sessionMode !== 'offline' && (
         <div className="fixed inset-0 bg-slate-950/90 z-50 flex items-center justify-center p-4 backdrop-blur-md">
           <div className="bg-[#090e24] border-2 border-amber-500/40 p-6 rounded-2xl max-w-md w-full shadow-2xl shadow-amber-950/25 space-y-4 text-center">
             <div className="w-12 h-12 rounded-full bg-amber-950/80 border border-amber-600 flex items-center justify-center mx-auto text-amber-400 animate-pulse">
@@ -315,6 +484,7 @@ export default function App() {
             onAddBot={addBot}
             onStartGame={startGame}
             onLeaveRoom={leaveRoom}
+            onStartSinglePlayer={startSinglePlayer}
           />
         </div>
       ) : !roomState.gameStarted ? (
@@ -332,6 +502,7 @@ export default function App() {
             onAddBot={addBot}
             onStartGame={startGame}
             onLeaveRoom={leaveRoom}
+            onStartSinglePlayer={startSinglePlayer}
           />
         </div>
       ) : (
@@ -341,6 +512,9 @@ export default function App() {
           <div className="absolute inset-0 z-0">
             <SpaceBattlefield
               state={roomState}
+              serverTimeMs={serverTimeMs}
+              liveStateRef={sessionMode === 'offline' ? offlineStateRef : undefined}
+              isLiveSimulation={sessionMode === 'offline'}
               playerId={playerId}
               onDispatchFleet={dispatchFleet}
               onPlayCardTarget={playCardTarget}

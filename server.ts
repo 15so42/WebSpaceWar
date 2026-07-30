@@ -26,6 +26,7 @@ const PROTOCOL_VERSION = '1.0.0';
 
 interface GameRoom {
   roomId: string;
+  hostPlayerId: PlayerId | null;
   state: GameState;
   clients: Map<PlayerId, WebSocket>;
   botTickAccumulator: number;
@@ -34,6 +35,7 @@ interface GameRoom {
 }
 
 const rooms: Record<string, GameRoom> = {};
+const MAX_PLAYERS_PER_ROOM = 4;
 
 // Broadcast lobby lists to clients looking at selection screen
 const lobbyViewers = new Set<WebSocket>();
@@ -44,7 +46,7 @@ function broadcastLobbies() {
     return {
       roomId: r.roomId,
       playerCount,
-      maxPlayers: 4,
+      maxPlayers: MAX_PLAYERS_PER_ROOM,
       gameStarted: r.state.gameStarted,
     };
   });
@@ -140,6 +142,7 @@ function broadcastRoomState(room: GameRoom) {
         type: MessageType.ROOM_STATE,
         state: room.state,
         playerId,
+        serverTimeMs: Date.now(),
       };
       ws.send(JSON.stringify(msg));
     }
@@ -148,7 +151,7 @@ function broadcastRoomState(room: GameRoom) {
 
 async function startServer() {
   const app = express();
-  const PORT = 3000;
+  const PORT = Number(process.env.PORT) || 3000;
 
   // Standard JSON middleware
   app.use(express.json());
@@ -190,7 +193,7 @@ async function startServer() {
       return {
         roomId: r.roomId,
         playerCount,
-        maxPlayers: 4,
+        maxPlayers: MAX_PLAYERS_PER_ROOM,
         gameStarted: r.state.gameStarted,
       };
     });
@@ -223,6 +226,7 @@ async function startServer() {
             console.log(`[Lobby] Creating new room: ${roomId}`);
             rooms[roomId] = {
               roomId,
+              hostPlayerId: null,
               state: {
                 roomId,
                 players: {},
@@ -264,7 +268,7 @@ async function startServer() {
           }
 
           // Join lobby phase
-          if (Object.keys(room.state.players).length >= 4) {
+          if (Object.keys(room.state.players).length >= MAX_PLAYERS_PER_ROOM) {
             ws.send(JSON.stringify({ type: MessageType.ERROR, message: '该房间已满员 (上限 4 人)。' }));
             lobbyViewers.add(ws);
             return;
@@ -284,6 +288,7 @@ async function startServer() {
             effects: [],
             isBot: false,
           };
+          room.hostPlayerId ??= playerId;
 
           room.state.logs.unshift(`📡 玩家 ${playerName} 加入了游戏大厅。`);
           ws.send(JSON.stringify({ type: MessageType.JOIN_SUCCESS, playerId, roomId }));
@@ -308,6 +313,10 @@ async function startServer() {
           switch (cmd.type) {
             case CommandType.START_GAME: {
               if (room.state.gameStarted) return;
+              if (registeredPlayerId !== room.hostPlayerId) {
+                ws.send(JSON.stringify({ type: MessageType.ERROR, message: '只有房主可以开始战役。' }));
+                return;
+              }
 
               // Generate game state
               const playersList = Object.values(room.state.players).map((p) => ({
@@ -360,6 +369,14 @@ async function startServer() {
 
             case CommandType.ADD_BOT: {
               if (room.state.gameStarted) return;
+              if (registeredPlayerId !== room.hostPlayerId) {
+                ws.send(JSON.stringify({ type: MessageType.ERROR, message: '只有房主可以添加电脑 AI。' }));
+                return;
+              }
+              if (Object.keys(room.state.players).length >= MAX_PLAYERS_PER_ROOM) {
+                ws.send(JSON.stringify({ type: MessageType.ERROR, message: '该房间已满员 (上限 4 人)。' }));
+                return;
+              }
               const botCount = Object.values(room.state.players).filter((p) => p.isBot).length;
               const botId = generateId('bot');
               const botName = `AI 掠夺者 #${botCount + 1}`;
@@ -427,6 +444,9 @@ async function startServer() {
     if (!room.state.gameStarted) {
       // If lobby hasn't started, fully remove player
       delete room.state.players[playerId];
+      if (room.hostPlayerId === playerId) {
+        room.hostPlayerId = Object.values(room.state.players).find((player) => !player.isBot)?.id ?? null;
+      }
       room.state.logs.unshift(`📡 玩家已退出大厅。`);
       broadcastRoomState(room);
     } else {
@@ -443,8 +463,14 @@ async function startServer() {
 
   // Vite middleware setup
   if (process.env.NODE_ENV !== 'production') {
+    const hmrPort = Number(process.env.HMR_PORT);
+    const hmr = process.env.DISABLE_HMR === 'true'
+      ? false
+      : Number.isInteger(hmrPort) && hmrPort > 0
+        ? { port: hmrPort }
+        : true;
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: { middlewareMode: true, hmr },
       appType: 'spa',
     });
     app.use(vite.middlewares);

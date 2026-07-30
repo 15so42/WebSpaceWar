@@ -10,10 +10,11 @@ interface LobbyScreenProps {
   lobbies: LobbyInfo[];
   currentRoomState: GameState | null;
   playerId: string;
-  onJoinRoom: () => void;
+  onJoinRoom: (roomId?: string) => void;
   onAddBot: () => void;
   onStartGame: () => void;
   onLeaveRoom: () => void;
+  onStartSinglePlayer: () => void;
 }
 
 export default function LobbyScreen({
@@ -28,24 +29,21 @@ export default function LobbyScreen({
   onAddBot,
   onStartGame,
   onLeaveRoom,
+  onStartSinglePlayer,
 }: LobbyScreenProps) {
   const [customRoomId, setCustomRoomId] = useState('');
 
   const handleJoinCustom = (e: React.FormEvent) => {
     e.preventDefault();
     if (!customRoomId.trim()) return;
-    setRoomId(customRoomId.toUpperCase().trim());
-    setTimeout(() => {
-      onJoinRoom();
-    }, 50);
+    const normalizedRoomId = customRoomId.toUpperCase().trim();
+    setRoomId(normalizedRoomId);
+    onJoinRoom(normalizedRoomId);
   };
 
   const handleJoinLobby = (id: string) => {
     setRoomId(id);
-    // Tiny delay to ensure state updates
-    setTimeout(() => {
-      onJoinRoom();
-    }, 50);
+    onJoinRoom(id);
   };
 
   const isLobbyOwner = currentRoomState
@@ -127,6 +125,15 @@ export default function LobbyScreen({
                 创建/加入
               </button>
             </form>
+
+            <button
+              onClick={onStartSinglePlayer}
+              disabled={!playerName.trim()}
+              className="w-full bg-emerald-700 hover:bg-emerald-600 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold rounded-lg px-6 py-3 flex items-center justify-center gap-2 transition-colors cursor-pointer"
+            >
+              <Bot className="w-5 h-5" />
+              离线单机模式（对抗 3 名 AI）
+            </button>
 
             {/* Existing Lobbies list */}
             <div>
@@ -241,7 +248,7 @@ export default function LobbyScreen({
             <div className="pt-4 flex flex-col sm:flex-row gap-4">
               <button
                 onClick={onAddBot}
-                disabled={currentPlayers.length >= 4}
+                disabled={!isLobbyOwner || currentPlayers.length >= 4}
                 className="flex-1 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 disabled:cursor-not-allowed text-slate-200 border border-slate-700 font-bold rounded-lg px-5 py-3.5 flex items-center justify-center gap-2 transition-colors cursor-pointer"
               >
                 <Bot className="w-5 h-5 text-indigo-400" />
@@ -250,7 +257,7 @@ export default function LobbyScreen({
 
               <button
                 onClick={onStartGame}
-                disabled={currentPlayers.length === 0}
+                disabled={!isLobbyOwner || currentPlayers.length === 0}
                 className="flex-1 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-extrabold rounded-lg px-6 py-3.5 flex items-center justify-center gap-2 shadow-lg shadow-emerald-950/40 transition-colors cursor-pointer"
               >
                 <Play className="w-5 h-5 fill-current" />

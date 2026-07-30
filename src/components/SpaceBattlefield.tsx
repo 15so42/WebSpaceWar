@@ -1,10 +1,14 @@
 import React, { useRef, useEffect, useState, MouseEvent, useMemo, useCallback } from 'react';
 import { GameState, Planet, Ship, ShipType, ShipState, PlanetType, PlanetSubType } from '../types';
-import { SHIP_CONFIGS, MAP_WIDTH, MAP_HEIGHT, computeShipOrbitPosition, getShipOrbitParams, getOrbitEntryAngle, getOrbitPosFromPhase } from '../gameEngine';
+import { SHIP_CONFIGS, MAP_WIDTH, MAP_HEIGHT, getShipOrbitParams } from '../gameEngine';
 import { Target, Shield, Compass, Swords, Eye, X, ChevronRight, Sliders, Sun, Camera, RotateCcw, Activity } from 'lucide-react';
 
 interface SpaceBattlefieldProps {
   state: GameState;
+  serverTimeMs: number | null;
+  /** Single-player simulation advances this ref every animation frame. */
+  liveStateRef?: React.RefObject<GameState | null>;
+  isLiveSimulation?: boolean;
   playerId: string;
   onDispatchFleet: (sourceId: string, targetId: string, shipType: ShipType, count: number) => void;
   onPlayCardTarget: (planetId: string) => void;
@@ -928,7 +932,35 @@ function draw3DTiltedCircle(
   if (lineDash) ctx.setLineDash([]);
 }
 
-// Procedurally draws beautiful, high-detail 3D spacecraft scaling with perspective camera depth
+function getEnginePalette(type: ShipType) {
+  if (type === ShipType.DREADNOUGHT) return { glow: '#22d3ee', hot: '#a5f3fc', core: '#ffffff' };
+  if (type === ShipType.SPY) return { glow: '#e879f9', hot: '#f5d0fe', core: '#ffffff' };
+  if (type === ShipType.FRIGATE) return { glow: '#a78bfa', hot: '#ddd6fe', core: '#ffffff' };
+  return { glow: '#fb923c', hot: '#fed7aa', core: '#ffffff' };
+}
+
+function getShipVisualScale(type: ShipType) {
+  return type === ShipType.DREADNOUGHT ? 1.05 : type === ShipType.FRIGATE ? 0.81 : type === ShipType.SPY ? 0.775 : 0.75;
+}
+
+function smoothStep01(value: number) {
+  const t = Math.max(0, Math.min(1, value));
+  return t * t * (3 - 2 * t);
+}
+
+// A full belly-to-planet roll can approach 180 degrees. Cap its visual motion
+// so entry and breakout retain the same deliberate feel as heading turns.
+const MAX_SHIP_ROLL_RATE = Math.PI * 0.45; // 81 degrees per second
+
+interface ShipRollState {
+  angle: number;
+}
+
+function shortestAngleDelta(target: number, current: number) {
+  return Math.atan2(Math.sin(target - current), Math.cos(target - current));
+}
+
+// Procedural 3D ships with strong class silhouettes at tactical camera distance.
 function draw3DShip(
   ctx: CanvasRenderingContext2D,
   type: ShipType,
@@ -942,9 +974,13 @@ function draw3DShip(
   width: number,
   height: number,
   planetCenter?: { x: number; y: number; z?: number },
-  velo3D?: { x: number; y: number; z: number }
+  velo3D?: { x: number; y: number; z: number },
+  planetOrientationBlend = planetCenter ? 1 : 0,
+  rollState?: ShipRollState,
+  frameDeltaSec = 1 / 60
 ) {
-  const scale = (type === ShipType.DREADNOUGHT ? 0.90 : type === ShipType.FRIGATE ? 0.72 : type === ShipType.SPY ? 0.58 : 0.52) * 2.0;
+  // Keep ships readable without competing with planets at the tactical zoom.
+  const scale = getShipVisualScale(type);
   const baseRgb = hexToRgb(baseColorHex) || { r: 255, g: 255, b: 255 };
 
   interface ShipFace {
@@ -958,64 +994,54 @@ function draw3DShip(
   let faces: ShipFace[] = [];
 
   if (type === ShipType.SCOUT) {
-    // High-speed Interceptor: Sleek needle nose, dual delta wings, glowing canopy
+    // Explorer interceptor: a wide arrowhead silhouette that remains readable at map zoom.
     vertices = [
-      { x: 18, y: 0, z: 0 },       // 0: Nose tip
-      { x: 3, y: 0, z: 3.5 },       // 1: Canopy top peak
-      { x: 3, y: 0, z: -2.0 },      // 2: Belly mid
-      { x: -6, y: -13, z: -1.0 },   // 3: Left wingtip
-      { x: -6, y: 13, z: -1.0 },    // 4: Right wingtip
-      { x: -4, y: -4, z: 1.0 },     // 5: Left wing root top
-      { x: -4, y: 4, z: 1.0 },      // 6: Right wing root top
-      { x: -14, y: 0, z: 5.5 },     // 7: Tail fin top peak
-      { x: -14, y: -4, z: -0.5 },   // 8: Left engine nozzle
-      { x: -14, y: 4, z: -0.5 },    // 9: Right engine nozzle
-      { x: 10, y: 0, z: 1.5 },      // 10: Canopy front slope
+      { x: 24, y: 0, z: 0 },        // 0: armored nose
+      { x: 7, y: 0, z: 5.5 },       // 1: raised cockpit
+      { x: 6, y: 0, z: -3.5 },      // 2: ventral hull
+      { x: -3, y: -20, z: -1 },     // 3: swept port wing
+      { x: -3, y: 20, z: -1 },      // 4: swept starboard wing
+      { x: -6, y: -6, z: 2 },       // 5: port fuselage shoulder
+      { x: -6, y: 6, z: 2 },        // 6: starboard fuselage shoulder
+      { x: -19, y: 0, z: 7 },       // 7: tail fin
+      { x: -19, y: -7, z: -1 },     // 8: port engine
+      { x: -19, y: 7, z: -1 },      // 9: starboard engine
+      { x: 13, y: 0, z: 2 },        // 10: canopy brow
     ];
     faces = [
-      // Cockpit Windshield (Glowing Cyan Accent)
+      // Bright cockpit and broad lifting surfaces.
       { indices: [0, 10, 1], isGlow: true, glowColor: '#38bdf8' },
       { indices: [10, 6, 1], isGlow: true, glowColor: '#0284c7' },
       { indices: [10, 1, 5], isGlow: true, glowColor: '#0284c7' },
-
-      // Nose & Upper Fuselage
       { indices: [0, 5, 10] },
       { indices: [0, 10, 6] },
       { indices: [0, 2, 5] },
       { indices: [0, 6, 2] },
-
-      // Wings Top
       { indices: [10, 3, 5], isDarkPanel: true },
       { indices: [10, 6, 4], isDarkPanel: true },
       { indices: [5, 3, 8] },
       { indices: [6, 9, 4] },
-
-      // Wings Bottom
       { indices: [2, 3, 8] },
       { indices: [2, 9, 4] },
-
-      // Tail Vertical Stabilizer Fin
       { indices: [1, 7, 8] },
       { indices: [1, 9, 7] },
-
-      // Engine Exhaust Rear
       { indices: [8, 7, 9], isGlow: true, glowColor: '#f97316' },
     ];
   } else if (type === ShipType.FRIGATE) {
-    // Heavy Escort Frigate: Wedge bow, dorsal bridge, side weapon sponsons, quad engines
+    // Escort frigate: a compact double-boom gunship, visually distinct from the capital ship.
     vertices = [
-      { x: 22, y: -3.5, z: 0.5 },   // 0: Left bow tip
-      { x: 22, y: 3.5, z: 0.5 },    // 1: Right bow tip
-      { x: 14, y: 0, z: -2.0 },     // 2: Bow center notch
-      { x: 6, y: 0, z: 6.5 },       // 3: Dorsal bridge peak
-      { x: 12, y: 0, z: 3.0 },      // 4: Bridge visor front
-      { x: -6, y: -15, z: -1.5 },   // 5: Left wingtip sponson
-      { x: -6, y: 15, z: -1.5 },    // 6: Right wingtip sponson
-      { x: -2, y: -6, z: 2.0 },     // 7: Upper left hull ridge
-      { x: -2, y: 6, z: 2.0 },      // 8: Upper right hull ridge
-      { x: -16, y: -6, z: 1.0 },    // 9: Stern left engine bay
-      { x: -16, y: 6, z: 1.0 },     // 10: Stern right engine bay
-      { x: -16, y: 0, z: -3.5 },    // 11: Stern lower keel
+      { x: 27, y: -6, z: 1 },       // 0: port bow plate
+      { x: 27, y: 6, z: 1 },        // 1: starboard bow plate
+      { x: 16, y: 0, z: -4 },       // 2: reinforced keel
+      { x: 5, y: 0, z: 9 },         // 3: raised command bridge
+      { x: 14, y: 0, z: 4 },        // 4: amber bridge visor
+      { x: -4, y: -20, z: -2 },     // 5: port weapon boom
+      { x: -4, y: 20, z: -2 },      // 6: starboard weapon boom
+      { x: -1, y: -8, z: 3 },       // 7: port armor shoulder
+      { x: -1, y: 8, z: 3 },        // 8: starboard armor shoulder
+      { x: -22, y: -10, z: 1 },     // 9: port engine nacelle
+      { x: -22, y: 10, z: 1 },      // 10: starboard engine nacelle
+      { x: -23, y: 0, z: -5 },      // 11: ventral reactor block
     ];
     faces = [
       // Command Bridge Visor (Glowing Amber Accent)
@@ -1046,21 +1072,21 @@ function draw3DShip(
       { indices: [9, 10, 11], isGlow: true, glowColor: '#a855f7' },
     ];
   } else if (type === ShipType.DREADNOUGHT) {
-    // Capital Battlecruiser: Heavy armored prow, dual broadside decks, towering bridge, quad heavy engines
+    // Capital battlecruiser: a heavy wedge with unmistakable broadside armor blocks.
     vertices = [
-      { x: 28, y: 0, z: 1.0 },      // 0: Prow ramming tip
-      { x: 18, y: -4, z: 4.5 },     // 1: Bow upper left ridge
-      { x: 18, y: 4, z: 4.5 },      // 2: Bow upper right ridge
-      { x: 16, y: 0, z: -4.5 },     // 3: Bow lower keel
-      { x: 0, y: -19, z: -1.5 },    // 4: Left broadside wingtip
-      { x: 0, y: 19, z: -1.5 },     // 5: Right broadside wingtip
-      { x: -4, y: 0, z: 11.5 },     // 6: Citadel Command Tower Top
-      { x: 4, y: 0, z: 7.0 },       // 7: Citadel Bridge Front
-      { x: -20, y: -9, z: 0.5 },    // 8: Stern left thruster casing
-      { x: -20, y: 9, z: 0.5 },     // 9: Stern right thruster casing
-      { x: -22, y: 0, z: -2.5 },    // 10: Stern main center exhaust
-      { x: -8, y: -8, z: 3.0 },     // 11: Middeck left armor plate
-      { x: -8, y: 8, z: 3.0 },      // 12: Middeck right armor plate
+      { x: 34, y: 0, z: 1 },        // 0: ram prow
+      { x: 21, y: -7, z: 6 },       // 1: port bow armor
+      { x: 21, y: 7, z: 6 },        // 2: starboard bow armor
+      { x: 17, y: 0, z: -7 },       // 3: ventral ram keel
+      { x: -1, y: -25, z: -2 },     // 4: port broadside deck
+      { x: -1, y: 25, z: -2 },      // 5: starboard broadside deck
+      { x: -7, y: 0, z: 15 },       // 6: command citadel
+      { x: 5, y: 0, z: 8 },         // 7: bridge face
+      { x: -25, y: -12, z: 1 },     // 8: port engine pod
+      { x: -25, y: 12, z: 1 },      // 9: starboard engine pod
+      { x: -28, y: 0, z: -4 },      // 10: central drive keel
+      { x: -9, y: -11, z: 4 },      // 11: port armor slab
+      { x: -9, y: 11, z: 4 },       // 12: starboard armor slab
     ];
     faces = [
       // Citadel Command Visor (Glowing Royal Blue/Cyan)
@@ -1092,16 +1118,16 @@ function draw3DShip(
       { indices: [8, 9, 10], isGlow: true, glowColor: '#38bdf8' },
     ];
   } else {
-    // Spy Stealth Vessel: Diamond razor wing, glowing sensor dome
+    // Spy craft: a manta-like stealth glider with a broad crescent silhouette.
     vertices = [
-      { x: 18, y: 0, z: 0 },        // 0: Stealth prow tip
-      { x: -6, y: -16, z: -1.0 },   // 1: Left razor wingtip
-      { x: -6, y: 16, z: -1.0 },    // 2: Right razor wingtip
-      { x: 0, y: 0, z: 5.0 },       // 3: Stealth sensor dome top
-      { x: 6, y: 0, z: 2.5 },       // 4: Sensor dome front slope
-      { x: -14, y: -6, z: 2.0 },    // 5: Left tail fin peak
-      { x: -14, y: 6, z: 2.0 },     // 6: Right tail fin peak
-      { x: -14, y: 0, z: -2.5 },    // 7: Rear stealth engine port
+      { x: 22, y: 0, z: 0 },        // 0: sensor prow
+      { x: -2, y: -22, z: -1 },     // 1: port manta wing
+      { x: -2, y: 22, z: -1 },      // 2: starboard manta wing
+      { x: 0, y: 0, z: 6.5 },       // 3: faceted sensor dome
+      { x: 9, y: 0, z: 3 },         // 4: dome brow
+      { x: -18, y: -9, z: 3 },      // 5: port tail blade
+      { x: -18, y: 9, z: 3 },       // 6: starboard tail blade
+      { x: -20, y: 0, z: -3 },      // 7: concealed drive
     ];
     faces = [
       // Stealth Sensor Dome (Glowing Purple Crystal Matrix)
@@ -1141,10 +1167,23 @@ function draw3DShip(
     }
   }
 
-  // 2. Calculate Gravity Up Unit Vector u (Roof/top points along +u, Belly/ground points along -u towards planet center)
-  let ux = 0;
-  let uy = 0;
-  let uz = 1;
+  // 2. Calculate the screen-facing flight attitude. It is projected onto the
+  // plane perpendicular to forward before any orbit-entry roll is applied.
+  const screenDotForward = fz;
+  let ux = -screenDotForward * fx;
+  let uy = -screenDotForward * fy;
+  let uz = 1 - screenDotForward * fz;
+  let upMagnitude = Math.sqrt(ux * ux + uy * uy + uz * uz);
+  if (upMagnitude > 0.001) {
+    ux /= upMagnitude;
+    uy /= upMagnitude;
+    uz /= upMagnitude;
+  } else {
+    // The rare straight-up/down case still needs a stable roll reference.
+    ux = 1;
+    uy = 0;
+    uz = 0;
+  }
 
   if (planetCenter) {
     const pcZ = planetCenter.z ?? 0;
@@ -1154,22 +1193,49 @@ function draw3DShip(
     const rMag = Math.sqrt(rx * rx + ry * ry + rz * rz);
 
     if (rMag > 0.001) {
-      // Radially outward vector from planet center to ship
+      // Radially outward vector from planet center to ship.
       const urx = rx / rMag;
       const ury = ry / rMag;
       const urz = rz / rMag;
 
-      // Orthonormalize u against f
-      const dotUF = urx * fx + ury * fy + urz * fz;
-      let ox = urx - dotUF * fx;
-      let oy = ury - dotUF * fy;
-      let oz = urz - dotUF * fz;
-      const oMag = Math.sqrt(ox * ox + oy * oy + oz * oz);
+      // Project the target belly-to-planet attitude onto the same plane.
+      const radialDotForward = urx * fx + ury * fy + urz * fz;
+      let targetUx = urx - radialDotForward * fx;
+      let targetUy = ury - radialDotForward * fy;
+      let targetUz = urz - radialDotForward * fz;
+      const targetMagnitude = Math.sqrt(targetUx * targetUx + targetUy * targetUy + targetUz * targetUz);
 
-      if (oMag > 0.001) {
-        ux = ox / oMag;
-        uy = oy / oMag;
-        uz = oz / oMag;
+      if (targetMagnitude > 0.001) {
+        targetUx /= targetMagnitude;
+        targetUy /= targetMagnitude;
+        targetUz /= targetMagnitude;
+
+        // Roll around the ship's forward axis. This avoids the near-zero vector
+        // produced by linear up-vector blending when the two attitudes oppose.
+        const dotUp = Math.max(-1, Math.min(1, ux * targetUx + uy * targetUy + uz * targetUz));
+        const crossX = uy * targetUz - uz * targetUy;
+        const crossY = uz * targetUx - ux * targetUz;
+        const crossZ = ux * targetUy - uy * targetUx;
+        let fullRoll = Math.atan2(fx * crossX + fy * crossY + fz * crossZ, dotUp);
+        // At 180 degrees, +PI and -PI describe the same attitude. Keep the
+        // chosen sign consistent with the ship's current roll to avoid a flip.
+        if (Math.abs(Math.abs(fullRoll) - Math.PI) < 0.0001 && rollState?.angle) {
+          fullRoll = Math.sign(rollState.angle) * Math.PI;
+        }
+        const targetRoll = fullRoll * Math.max(0, Math.min(1, planetOrientationBlend));
+        const previousRoll = rollState?.angle ?? 0;
+        const maxRollDelta = MAX_SHIP_ROLL_RATE * frameDeltaSec;
+        const rollDelta = shortestAngleDelta(targetRoll, previousRoll);
+        const roll = previousRoll + Math.max(-maxRollDelta, Math.min(maxRollDelta, rollDelta));
+        if (rollState) rollState.angle = roll;
+        const cosRoll = Math.cos(roll);
+        const sinRoll = Math.sin(roll);
+        const forwardCrossUpX = fy * uz - fz * uy;
+        const forwardCrossUpY = fz * ux - fx * uz;
+        const forwardCrossUpZ = fx * uy - fy * ux;
+        ux = ux * cosRoll + forwardCrossUpX * sinRoll;
+        uy = uy * cosRoll + forwardCrossUpY * sinRoll;
+        uz = uz * cosRoll + forwardCrossUpZ * sinRoll;
       }
     }
   }
@@ -1255,14 +1321,15 @@ function draw3DShip(
     }
 
     const dot = nx * light.x + ny * light.y + nz * light.z;
-    const brightness = Math.max(0.30, (dot + 1) / 2);
+    // Lift the ambient floor so faction-coloured hulls stay visible in deep space.
+    const brightness = Math.max(0.52, (dot + 1) / 2);
 
     if (faceObj.isGlow && faceObj.glowColor) {
       ctx.fillStyle = faceObj.glowColor;
       ctx.strokeStyle = '#ffffff';
       ctx.lineWidth = 0.8;
     } else {
-      const mult = faceObj.isDarkPanel ? 0.65 : 1.0;
+      const mult = faceObj.isDarkPanel ? 0.82 : 1.0;
       const r = Math.round(baseRgb.r * brightness * mult);
       const g = Math.round(baseRgb.g * brightness * mult);
       const b = Math.round(baseRgb.b * brightness * mult);
@@ -1283,23 +1350,65 @@ function draw3DShip(
   });
 
   if (isMoving) {
-    // Engine thruster particle jet
-    for (let d = 1; d <= 4; d++) {
-      const trailDist = (d * 5 + Math.random() * 2) * scale;
-      const rearX = sx - fx * trailDist;
-      const rearY = sy - fy * trailDist;
-      const rearZ = sz - fz * trailDist;
+    // Stable HDR-style engine plumes: additive outer bloom, coloured plasma,
+    // and a white-hot core. They deliberately do not use random particles.
+    const palette = getEnginePalette(type);
+    const engineOffsets = type === ShipType.DREADNOUGHT
+      ? [-12, -4, 4, 12]
+      : type === ShipType.SCOUT ? [-7, 7] : [-5.5, 5.5];
+    const nozzleX = type === ShipType.DREADNOUGHT ? -25 : type === ShipType.SPY ? -19 : type === ShipType.FRIGATE ? -17 : -18;
+    const plumeLength = (type === ShipType.DREADNOUGHT ? 16 : type === ShipType.SPY ? 13 : 14) * scale;
 
-      const projRear = projectPoint(rearX, rearY, rearZ, camFocus, width, height);
-      const alpha = (0.85 - d * 0.18) * (0.65 + Math.random() * 0.35);
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    engineOffsets.forEach((offset) => {
+      const nozzle = {
+        x: sx + fx * nozzleX * scale + sx_unit * offset * scale,
+        y: sy + fy * nozzleX * scale + sy_unit * offset * scale,
+        z: sz + fz * nozzleX * scale + sz_unit * offset * scale,
+      };
+      const tail = {
+        x: nozzle.x - fx * plumeLength,
+        y: nozzle.y - fy * plumeLength,
+        z: nozzle.z - fz * plumeLength,
+      };
+      const projectedNozzle = projectPoint(nozzle.x, nozzle.y, nozzle.z, camFocus, width, height);
+      const projectedTail = projectPoint(tail.x, tail.y, tail.z, camFocus, width, height);
+      const glowWidth = Math.max(0.8, 3.2 * scale * projectedNozzle.scale);
+      const dx = projectedTail.x - projectedNozzle.x;
+      const dy = projectedTail.y - projectedNozzle.y;
+      const distance = Math.hypot(dx, dy) || 1;
+      const px = -dy / distance;
+      const py = dx / distance;
 
-      ctx.fillStyle = type === ShipType.DREADNOUGHT ? '#38bdf8' : type === ShipType.FRIGATE ? '#a855f7' : '#f97316';
-      ctx.globalAlpha = Math.max(0, alpha);
+      // Tapered flame silhouette: wide at the nozzle, narrowing to a point.
+      const drawPlumeLayer = (widthAtNozzle: number, fillStyle: string | CanvasGradient, alpha: number) => {
+        ctx.fillStyle = fillStyle;
+        ctx.globalAlpha = alpha;
+        ctx.beginPath();
+        ctx.moveTo(projectedNozzle.x + px * widthAtNozzle, projectedNozzle.y + py * widthAtNozzle);
+        ctx.lineTo(projectedNozzle.x - px * widthAtNozzle, projectedNozzle.y - py * widthAtNozzle);
+        ctx.lineTo(projectedTail.x, projectedTail.y);
+        ctx.closePath();
+        ctx.fill();
+      };
+
+      drawPlumeLayer(glowWidth * 1.55, palette.glow, 0.42);
+
+      const plasma = ctx.createLinearGradient(projectedTail.x, projectedTail.y, projectedNozzle.x, projectedNozzle.y);
+      plasma.addColorStop(0, 'rgba(255,255,255,0)');
+      plasma.addColorStop(0.38, palette.glow);
+      plasma.addColorStop(0.78, palette.hot);
+      plasma.addColorStop(1, palette.core);
+      drawPlumeLayer(glowWidth * 0.78, plasma, 0.96);
+
+      ctx.fillStyle = palette.core;
+      ctx.globalAlpha = 1;
       ctx.beginPath();
-      ctx.arc(projRear.x, projRear.y, Math.max(0.4, (6.0 - d * 1.1) * projRear.scale * 0.65), 0, Math.PI * 2);
+      ctx.arc(projectedNozzle.x, projectedNozzle.y, Math.max(0.7, glowWidth * 0.38), 0, Math.PI * 2);
       ctx.fill();
-    }
-    ctx.globalAlpha = 1.0;
+    });
+    ctx.restore();
   }
 }
 
@@ -1393,6 +1502,9 @@ const generateBackgroundAssets = (): { stars: BackgroundStar[]; nebulae: Backgro
 
 export default function SpaceBattlefield({
   state,
+  serverTimeMs,
+  liveStateRef,
+  isLiveSimulation = false,
   playerId,
   onDispatchFleet,
   onPlayCardTarget,
@@ -1443,9 +1555,36 @@ export default function SpaceBattlefield({
   const frameCountRef = useRef(0);
   const lastFpsTimeRef = useRef(Date.now());
 
-  // Smooth client-side interpolation refs for lag-free 60fps ship movement & flight trails
-  const smoothProgressMapRef = useRef<Record<string, number>>({});
+  // A render loop must not restart for each 20 Hz Host snapshot. Keep the latest
+  // inputs in refs, while requestAnimationFrame remains continuous at display rate.
+  const latestStateRef = useRef<GameState>(state);
+  const liveStateSourceRef = useRef<React.RefObject<GameState | null> | undefined>(liveStateRef);
+  const liveSimulationRef = useRef(isLiveSimulation);
+  const latestCamFocusRef = useRef<{ x: number; y: number }>(camFocus);
+  const latestZoomRef = useRef<number>(zoom);
+  const latestDragStartPlanetRef = useRef<Planet | null>(dragStartPlanet);
+  const latestDragCurrentPosRef = useRef<{ x: number; y: number } | null>(dragCurrentPos);
+  const latestHoveredPlanetRef = useRef<Planet | null>(hoveredPlanet);
+  const latestSelectedCardIdRef = useRef<string | null>(selectedCardId);
+  const snapshotServerTimeRef = useRef<number | null>(serverTimeMs);
+  const snapshotReceivedAtRef = useRef(Date.now());
+
+  latestStateRef.current = state;
+  liveStateSourceRef.current = liveStateRef;
+  liveSimulationRef.current = isLiveSimulation;
+  latestCamFocusRef.current = camFocus;
+  latestZoomRef.current = zoom;
+  latestDragStartPlanetRef.current = dragStartPlanet;
+  latestDragCurrentPosRef.current = dragCurrentPos;
+  latestHoveredPlanetRef.current = hoveredPlanet;
+  latestSelectedCardIdRef.current = selectedCardId;
+  if (serverTimeMs !== null && serverTimeMs !== snapshotServerTimeRef.current) {
+    snapshotServerTimeRef.current = serverTimeMs;
+    snapshotReceivedAtRef.current = Date.now();
+  }
+
   const smoothTrailMapRef = useRef<Record<string, Array<{ wx: number; wy: number; wz: number; time: number }>>>({});
+  const shipRollStateMapRef = useRef<Record<string, ShipRollState>>({});
   const lastFrameTimeRef = useRef<number>(Date.now());
 
   // Keep global debug reference updated
@@ -1669,6 +1808,15 @@ export default function SpaceBattlefield({
     let animId: number;
 
     const render = () => {
+      const state: GameState = liveStateSourceRef.current?.current ?? latestStateRef.current;
+      const isLiveSimulation = liveSimulationRef.current;
+      const camFocus = latestCamFocusRef.current;
+      const zoom = latestZoomRef.current;
+      const dragStartPlanet = latestDragStartPlanetRef.current;
+      const dragCurrentPos = latestDragCurrentPosRef.current;
+      const hoveredPlanet = latestHoveredPlanetRef.current;
+      const selectedCardId = latestSelectedCardIdRef.current;
+
       // FPS measurement for F3 Debug Overlay
       frameCountRef.current++;
       const nowMs = Date.now();
@@ -1680,6 +1828,13 @@ export default function SpaceBattlefield({
 
       const frameDeltaSec = Math.min(0.08, Math.max(0.001, (nowMs - (lastFrameTimeRef.current || nowMs)) / 1000));
       lastFrameTimeRef.current = nowMs;
+
+      // Do not compare a browser clock directly with a Host clock. At snapshot
+      // receipt, host time is the authoritative visual anchor; afterwards only
+      // a small bounded lead is used to keep the ship moving between packets.
+      const hostNowMs = snapshotServerTimeRef.current === null
+        ? nowMs
+        : snapshotServerTimeRef.current + Math.min(75, nowMs - snapshotReceivedAtRef.current);
 
       // Update global zoom reference for 3D projections on each frame
       globalCurrentZoom = zoom;
@@ -1781,6 +1936,8 @@ export default function SpaceBattlefield({
         headingAngle: number;
         shipColor: string;
         planetCenter?: { x: number; y: number; z: number };
+        planetOrientationBlend?: number;
+        rollState: ShipRollState;
         velo3D?: { x: number; y: number; z: number };
       }
 
@@ -1816,46 +1973,32 @@ export default function SpaceBattlefield({
         let wz = 0;
         let headingAngle = 0;
         let planetCenter: { x: number; y: number; z: number } | undefined = undefined;
+        let planetOrientationBlend: number | undefined = undefined;
+        let desiredPlanetOrientationBlend = 0;
+        let desiredPlanetCenter: { x: number; y: number; z: number } | undefined = undefined;
         let velo3D: { x: number; y: number; z: number } | undefined = undefined;
 
         if (sh.state === ShipState.MOVING && sh.targetPlanetId) {
-          const src = state.planets[sh.planetId];
           const tgt = state.planets[sh.targetPlanetId];
           if (tgt) {
-            let sx = sh.startX;
-            let sy = sh.startY;
-            let sz = sh.startZ;
+            const leadSeconds = isLiveSimulation ? 0 : snapshotServerTimeRef.current === null
+              ? 0
+              : Math.max(0, (hostNowMs - snapshotServerTimeRef.current) / 1000);
+            headingAngle = sh.headingAngle ?? Math.atan2(tgt.y - sh.y, tgt.x - sh.x);
+            wx = sh.x + Math.cos(headingAngle) * sh.speed * leadSeconds;
+            wy = sh.y + Math.sin(headingAngle) * sh.speed * leadSeconds;
+            wz = sh.z || 0;
+            velo3D = { x: Math.cos(headingAngle), y: Math.sin(headingAngle), z: 0 };
 
-            if (sx === undefined || sy === undefined || sz === undefined) {
-              sx = sh.x;
-              sy = sh.y;
-              sz = sh.z || 0;
-            }
-
-            const params = getShipOrbitParams(sh, tgt);
-            const entryAngle = getOrbitEntryAngle(sx, sy, sz, tgt, params);
-            const entryPos = getOrbitPosFromPhase(tgt, params, entryAngle);
-
-            const dx = entryPos.x - sx;
-            const dy = entryPos.y - sy;
-            const dz = entryPos.z - sz;
-            const dist = Math.hypot(dx, dy, dz);
-
-            if (dist > 0) {
-              const dtFrame = Math.max(0, Math.min(0.1, (nowMs - (sh.lastUpdateMs || nowMs)) / 1000));
-              const p = Math.min(0.999, Math.max(0.0, sh.travelProgress + (sh.speed * dtFrame) / dist));
-
-              wx = sx + dx * p;
-              wy = sy + dy * p;
-              wz = sz + dz * p + Math.sin(Math.PI * p) * Math.min(30, dist * 0.1);
-
-              headingAngle = sh.headingAngle ?? Math.atan2(dy, dx);
-              velo3D = { x: dx, y: dy, z: dz };
-            } else {
-              wx = sh.x;
-              wy = sh.y;
-              wz = sh.z || 0;
-              headingAngle = sh.headingAngle || 0;
+            // Roll toward belly-to-planet purely as the current distance enters
+            // the target altitude band; it no longer depends on a path phase.
+            const distance = Math.hypot(sh.x - tgt.x, sh.y - tgt.y);
+            const targetRadius = getShipOrbitParams(sh, tgt).orbitRad;
+            const attitudeBand = Math.max(100, sh.speed * 1.2);
+            const attitudeProgress = 1 - (distance - targetRadius) / attitudeBand;
+            if (attitudeProgress > 0) {
+              desiredPlanetCenter = { x: tgt.x, y: tgt.y, z: 0 };
+              desiredPlanetOrientationBlend = smoothStep01(attitudeProgress);
             }
           } else {
             wx = sh.x;
@@ -1866,42 +2009,31 @@ export default function SpaceBattlefield({
         } else {
           const pl = state.planets[sh.planetId];
           if (pl) {
-            planetCenter = { x: pl.x, y: pl.y, z: 0 };
-            const orb = computeShipOrbitPosition(sh, pl, nowMs);
-
-            // Check if enemy ships exist at this planet for combat pursuit disengagement
-            const enemyShipsAtPl = Object.values(state.ships).filter(
-              (other) => other.planetId === sh.planetId && other.ownerId !== sh.ownerId && other.state !== ShipState.MOVING
-            );
-
-            if (enemyShipsAtPl.length > 0 && SHIP_CONFIGS[sh.type].attack > 0) {
-              // Combat Pursuit Mode: disengage tight orbit to chase target enemy ship
-              const target = enemyShipsAtPl[0];
-              const targetOrb = computeShipOrbitPosition(target, pl, nowMs);
-
-              const dx = targetOrb.x - orb.x;
-              const dy = targetOrb.y - orb.y;
-              const dz = targetOrb.z - orb.z;
-
-              const chaseFactor = 0.35;
-              wx = orb.x + dx * chaseFactor;
-              wy = orb.y + dy * chaseFactor;
-              wz = orb.z + dz * chaseFactor;
-
-              headingAngle = Math.atan2(dy, dx);
-              velo3D = { x: dx, y: dy, z: dz };
-            } else {
-              // Peaceful Orbit
-              wx = orb.x;
-              wy = orb.y;
-              wz = orb.z;
-              velo3D = orb.velo3D;
-              headingAngle = orb.headingAngle;
-            }
+            desiredPlanetCenter = { x: pl.x, y: pl.y, z: 0 };
+            desiredPlanetOrientationBlend = 1;
+            const leadSeconds = isLiveSimulation ? 0 : snapshotServerTimeRef.current === null
+              ? 0
+              : Math.max(0, (hostNowMs - snapshotServerTimeRef.current) / 1000);
+            headingAngle = sh.headingAngle ?? 0;
+            wx = sh.x + Math.cos(headingAngle) * sh.speed * leadSeconds;
+            wy = sh.y + Math.sin(headingAngle) * sh.speed * leadSeconds;
+            wz = sh.z || 0;
+            velo3D = { x: Math.cos(headingAngle), y: Math.sin(headingAngle), z: 0 };
           }
         }
 
-        return { sh, wx, wy, wz, headingAngle, shipColor, planetCenter, velo3D };
+        const rollState = shipRollStateMapRef.current[sh.id] ?? { angle: 0 };
+        shipRollStateMapRef.current[sh.id] = rollState;
+        if (desiredPlanetCenter || Math.abs(rollState.angle) > 0.001) {
+          // A ship leaving an orbit keeps its previous planet reference until
+          // the capped actual roll has finished, instead of snapping upright.
+          const sourcePlanet = state.planets[sh.planetId];
+          planetCenter = desiredPlanetCenter
+            ?? (sourcePlanet ? { x: sourcePlanet.x, y: sourcePlanet.y, z: 0 } : undefined);
+          planetOrientationBlend = desiredPlanetOrientationBlend;
+        }
+
+        return { sh, wx, wy, wz, headingAngle, shipColor, planetCenter, planetOrientationBlend, rollState, velo3D };
       });
 
       // Combine planets and ships into a single depth-sorted render queue
@@ -1934,10 +2066,11 @@ export default function SpaceBattlefield({
           }
           draw3DPlanetWithLayers(ctx, pl, camFocus, canvas.width, canvas.height, planetColor, isHovered);
         } else {
-          const { sh, wx, wy, wz, headingAngle, shipColor, planetCenter, velo3D } = item.info;
+          const { sh, wx, wy, wz, headingAngle, shipColor, planetCenter, planetOrientationBlend, rollState, velo3D } = item.info;
 
-          // Ribbon trail for moving ships
-          if (sh.state === ShipState.MOVING) {
+          // All mobile ships leave a short engine wake, including steady orbital flight.
+          const hasEngineTrail = sh.speed > 0 && sh.state !== ShipState.GUARDING;
+          if (hasEngineTrail) {
             let trailList = smoothTrailMapRef.current[sh.id];
             if (!trailList) {
               trailList = [];
@@ -1955,6 +2088,9 @@ export default function SpaceBattlefield({
 
             if (trailList.length > 1) {
               ctx.save();
+              ctx.globalCompositeOperation = 'lighter';
+              const enginePalette = getEnginePalette(sh.type);
+              const shipScale = getShipVisualScale(sh.type);
               for (let i = 0; i < trailList.length - 1; i++) {
                 const pt1 = trailList[i];
                 const pt2 = trailList[i + 1];
@@ -1963,21 +2099,29 @@ export default function SpaceBattlefield({
                 const proj2 = projectPoint(pt2.wx, pt2.wy, pt2.wz, camFocus, canvas.width, canvas.height);
 
                 const lifeProgress = i / trailList.length;
-                const alpha = (1 - lifeProgress) * 0.75;
-                const lineWidth = Math.max(1.2, (14 - i * 0.7) * proj1.scale);
+                const alpha = (1 - lifeProgress) * 0.8;
+                const lineWidth = Math.max(0.45, (5.2 - i * 0.28) * proj1.scale * shipScale);
 
-                ctx.strokeStyle = shipColor;
-                ctx.globalAlpha = alpha;
-                ctx.lineWidth = lineWidth;
+                ctx.strokeStyle = enginePalette.glow;
+                ctx.globalAlpha = alpha * 0.45;
+                ctx.lineWidth = lineWidth * 1.55;
                 ctx.lineCap = 'round';
                 ctx.beginPath();
                 ctx.moveTo(proj1.x, proj1.y);
                 ctx.lineTo(proj2.x, proj2.y);
                 ctx.stroke();
 
-                ctx.strokeStyle = '#ffffff';
+                ctx.strokeStyle = enginePalette.hot;
                 ctx.globalAlpha = alpha * 0.85;
-                ctx.lineWidth = Math.max(0.8, lineWidth * 0.35);
+                ctx.lineWidth = Math.max(0.35, lineWidth * 0.5);
+                ctx.beginPath();
+                ctx.moveTo(proj1.x, proj1.y);
+                ctx.lineTo(proj2.x, proj2.y);
+                ctx.stroke();
+
+                ctx.strokeStyle = enginePalette.core;
+                ctx.globalAlpha = alpha * 0.85;
+                ctx.lineWidth = Math.max(0.22, lineWidth * 0.2);
                 ctx.beginPath();
                 ctx.moveTo(proj1.x, proj1.y);
                 ctx.lineTo(proj2.x, proj2.y);
@@ -1994,7 +2138,11 @@ export default function SpaceBattlefield({
           shipProjectedMap[sh.id] = { x: projShip.x, y: projShip.y };
 
           // Draw the high-detail 3D ship
-          draw3DShip(ctx, sh.type, wx, wy, wz, headingAngle, shipColor, sh.state === ShipState.MOVING, camFocus, canvas.width, canvas.height, planetCenter, velo3D);
+          draw3DShip(
+            ctx, sh.type, wx, wy, wz, headingAngle, shipColor, hasEngineTrail,
+            camFocus, canvas.width, canvas.height, planetCenter, velo3D,
+            planetOrientationBlend, rollState, frameDeltaSec
+          );
 
           // Draw mini HP/shield bar for injured ships (always visible as long as not full health)
           const isInjured = sh.hp < sh.maxHp || (sh.maxShield > 0 && sh.shield < sh.maxShield);
@@ -2494,7 +2642,7 @@ export default function SpaceBattlefield({
     return () => {
       cancelAnimationFrame(animId);
     };
-  }, [state, camFocus, dragStartPlanet, dragCurrentPos, hoveredPlanet, selectedCardId, bgAssets, zoom]);
+  }, [bgAssets]);
 
   return (
     <div

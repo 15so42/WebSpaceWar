@@ -23,6 +23,10 @@ export default function CardDeck({
   if (!player) return null;
 
   const handleCardClick = (card: CardInstance, def: any) => {
+    if (def.type === CardType.ABILITY) {
+      return;
+    }
+
     // Only Purge needs a target planet now, Blood Sacrifice is an instant direct conversion card
     if (def.id === 'purge') {
       if (selectedCardId === card.id) {
@@ -96,7 +100,7 @@ export default function CardDeck({
               <button
                 key={card.id}
                 onClick={() => handleCardClick(card, def)}
-                disabled={!canAfford && def.type !== CardType.ABILITY}
+                disabled={(!canAfford && def.type !== CardType.ABILITY) || def.type === CardType.ABILITY}
                 className={`relative p-2.5 border ${cardBorderClass} ${cardBg} ${
                   canAfford ? 'opacity-100 cursor-pointer' : 'opacity-40 cursor-not-allowed'
                 } rounded-xl shadow-lg text-left flex flex-col justify-between w-[115px] sm:w-[125px] h-[132px] shrink-0 group transition-all transform hover:-translate-y-1.5`}
