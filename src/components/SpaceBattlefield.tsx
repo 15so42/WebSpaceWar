@@ -1,7 +1,7 @@
 import React, { useRef, useEffect, useState, MouseEvent, useMemo, useCallback } from 'react';
 import { GameState, Planet, Ship, ShipType, ShipState, PlanetType, PlanetSubType } from '../types';
-import { SHIP_CONFIGS, MAP_WIDTH, MAP_HEIGHT } from '../gameEngine';
-import { Target, Shield, Compass, Swords, Eye, X, ChevronRight } from 'lucide-react';
+import { SHIP_CONFIGS, MAP_WIDTH, MAP_HEIGHT, computeShipOrbitPosition, getShipOrbitParams, getOrbitEntryAngle, getOrbitPosFromPhase } from '../gameEngine';
+import { Target, Shield, Compass, Swords, Eye, X, ChevronRight, Sliders, Sun, Camera, RotateCcw, Activity } from 'lucide-react';
 
 interface SpaceBattlefieldProps {
   state: GameState;
@@ -20,11 +20,40 @@ interface RadialMenuState {
   y: number;
 }
 
-// 3D Perspective Camera Parameters
-const PITCH = -0.785398; // Tilt angle (-45 degrees)
-const YAW = 0;  // Cinematic angle offset (0 degrees)
-const D = 900;       // Camera distance
-const FOCAL_LENGTH = 1000; // Focal length
+// 3D Perspective Camera Parameters & F3 Debug Interface
+export interface DebugSettings {
+  f3Open: boolean;
+  lightX: number;
+  lightY: number;
+  lightZ: number;
+  pitch: number;      // Camera Pitch angle in degrees (0 = top-down)
+  yaw: number;        // Camera Yaw angle in degrees
+  cameraD: number;    // Camera Distance / Height
+  focalLength: number;// Focal length
+  nameOffsetY: number;// Planet Name Y Offset relative to health bar
+  iconOffsetY: number;// Planet Icon Y Offset relative to planet name
+}
+
+export const defaultDebugSettings: DebugSettings = {
+  f3Open: false,
+  lightX: -0.354,
+  lightY: -0.354,
+  lightZ: 0.866,
+  pitch: 0,
+  yaw: 0,
+  cameraD: 1564,
+  focalLength: 1000,
+  nameOffsetY: -8,  // Brought closer to health bar
+  iconOffsetY: -13, // Brought closer to planet name
+};
+
+// Global mutable debug settings reference for 60FPS canvas loop access
+export let currentDebugSettings: DebugSettings = { ...defaultDebugSettings };
+
+let PITCH = 0; // Legacy fallback pitch
+let YAW = 0;   // Legacy fallback yaw
+let D = 1564;  // Legacy fallback camera distance
+let FOCAL_LENGTH = 1000; // Legacy fallback focal length
 
 // Shared global zoom factor for perspective calculations
 let globalCurrentZoom = 1.0;
@@ -234,10 +263,15 @@ export function projectPoint(
   const dy = wy - focus.y;
   const dz = wz;
 
-  const cosY = Math.cos(YAW);
-  const sinY = Math.sin(YAW);
-  const cosP = Math.cos(PITCH);
-  const sinP = Math.sin(PITCH);
+  const pitchRad = (currentDebugSettings?.pitch ?? 0) * (Math.PI / 180);
+  const yawRad = (currentDebugSettings?.yaw ?? 0) * (Math.PI / 180);
+  const camD = currentDebugSettings?.cameraD ?? 1564;
+  const fLength = currentDebugSettings?.focalLength ?? 1000;
+
+  const cosY = Math.cos(yawRad);
+  const sinY = Math.sin(yawRad);
+  const cosP = Math.cos(pitchRad);
+  const sinP = Math.sin(pitchRad);
 
   // 1. Rotate around Z (Yaw)
   const rx1 = dx * cosY - dy * sinY;
@@ -249,8 +283,8 @@ export function projectPoint(
   const ry2 = ry1 * cosP - rz1 * sinP;
   const rz2 = ry1 * sinP + rz1 * cosP;
 
-  const depth = (D / globalCurrentZoom) + rz2;
-  const scale = (FOCAL_LENGTH * globalCurrentZoom) / Math.max(100, depth);
+  const depth = (camD / globalCurrentZoom) + rz2;
+  const scale = (fLength * globalCurrentZoom) / Math.max(100, depth);
 
   const sx = width / 2 + rx2 * scale;
   const sy = height / 2 + ry2 * scale;
@@ -270,17 +304,9 @@ function getPlanetStyleConfig(planet: Planet, ownerColor?: string) {
   let ringColor = 'rgba(56, 189, 248, 0)';
   let atmosphereColor = 'rgba(14, 165, 233, 0.25)';
 
-  // Majestic size hierarchy for important strategic hubs
-  let radius = 26;
-  if (planet.type === PlanetType.HOME) {
-    radius = Math.floor(45 + rand() * 10); // 45 to 55 pixels: huge majestic capitals!
-  } else if (planet.name === '奥瑞恩中心晶矿') {
-    radius = Math.floor(36 + rand() * 8); // 36 to 44 pixels: giant highly contested crystal star!
-  } else if (planet.type === PlanetType.RESOURCE || planet.type === PlanetType.SPECIAL) {
-    radius = Math.floor(25 + rand() * 8); // 25 to 33 pixels: significant resource nodes
-  } else {
-    radius = Math.floor(18 + rand() * 6); // 18 to 24 pixels: smaller tactical outposts
-  }
+  // Random sizes for all planets (doubled 2x size as requested)
+  const radius = Math.floor((22 + rand() * 22) * 2); // 44 to 88 pixels: doubled 2x planet visual size
+
 
   if (planet.type === PlanetType.HOME) {
     const baseCol = ownerColor || '#3b82f6';
@@ -547,28 +573,6 @@ function draw3DPlanetWithLayers(
   // Let the clouds float above the surface at radius = 1.12
   const cMult = 1.12; // Cloud altitude
 
-  // --- 1. Realistic Volumetric Atmosphere Back-Glow (smooth radial gradient falling off rapidly) ---
-  const backGlowRad = screenR * 1.35;
-  const backGlow = ctx.createRadialGradient(
-    projCenter.x,
-    projCenter.y,
-    0, // start from center of planet
-    projCenter.x,
-    projCenter.y,
-    backGlowRad
-  );
-  backGlow.addColorStop(0, hexToRgba(cache.style.primaryColor, 0.5));
-  backGlow.addColorStop(0.65, hexToRgba(cache.style.primaryColor, 0.45));
-  backGlow.addColorStop(0.74, hexToRgba(cache.style.primaryColor, 0.35)); // starts sharp fade near planet edge
-  backGlow.addColorStop(0.85, hexToRgba(cache.style.primaryColor, 0.08)); // rapid fade-out
-  backGlow.addColorStop(0.92, hexToRgba(cache.style.primaryColor, 0.02)); // almost dark space
-  backGlow.addColorStop(1, 'transparent');
-
-  ctx.fillStyle = backGlow;
-  ctx.beginPath();
-  ctx.arc(projCenter.x, projCenter.y, backGlowRad, 0, Math.PI * 2);
-  ctx.fill();
-
   // --- 3D Ring Meteorites Depth-Sorting and Projection Math ---
   const backParticles: any[] = [];
   const frontParticles: any[] = [];
@@ -634,12 +638,12 @@ function draw3DPlanetWithLayers(
   // --- Draw BACK Particles of the 3D Ring ---
   drawRingParticles(backParticles);
 
-  // 2. Procedural Volumetric 3D Pixel Shader for Core Planet & Clouds
-  const screenR_cloud = screenR * cMult;
-  const res = 30; // High-quality retro pixel grid
-  const pixelSize = (screenR_cloud * 2) / res;
-  const startX = projCenter.x - screenR_cloud;
-  const startY = projCenter.y - screenR_cloud;
+  // 2. Procedural Volumetric 3D Pixel Shader for Core Planet, Clouds & Fading Atmosphere
+  const screenR_render = screenR * 1.30; // Cover atmosphere too
+  const res = 34; // Retro pixel grid resolution
+  const pixelSize = (screenR_render * 2) / res;
+  const startX = projCenter.x - screenR_render;
+  const startY = projCenter.y - screenR_render;
   const halfRes = res / 2;
 
   // Seeded noise objects for landmass and clouds
@@ -656,8 +660,12 @@ function draw3DPlanetWithLayers(
   const cosAC = Math.cos(cloudAngle);
   const sinAC = Math.sin(cloudAngle);
 
-  // Directional Toon Lighting source
-  const L = { x: -0.55, y: -0.55, z: 0.63 };
+  // Directional Toon Lighting source (from debug settings)
+  const rawLx = currentDebugSettings.lightX ?? -0.354;
+  const rawLy = currentDebugSettings.lightY ?? -0.354;
+  const rawLz = currentDebugSettings.lightZ ?? 0.866;
+  const lLen = Math.hypot(rawLx, rawLy, rawLz) || 1;
+  const L = { x: rawLx / lLen, y: rawLy / lLen, z: rawLz / lLen };
 
   // Select custom color palette
   const palette = getPixelPlanetPalette(pl, planetColor);
@@ -669,13 +677,47 @@ function draw3DPlanetWithLayers(
 
   // Draw pixel grid
   for (let px = 0; px < res; px++) {
+    const colStart = Math.round(startX + px * pixelSize);
+    const colEnd = Math.round(startX + (px + 1) * pixelSize);
+    const w = colEnd - colStart;
+
     for (let py = 0; py < res; py++) {
-      // Coordinates normalized to cloud sphere radius [-1.0, 1.0]
-      const dx = (px - halfRes + 0.5) / halfRes;
-      const dy = (py - halfRes + 0.5) / halfRes;
+      const rowStart = Math.round(startY + py * pixelSize);
+      const rowEnd = Math.round(startY + (py + 1) * pixelSize);
+      const h_px = rowEnd - rowStart;
+
+      // Coordinates normalized to atmosphere render bounds [-1.0, 1.0]
+      const dx_render = (px - halfRes + 0.5) / halfRes;
+      const dy_render = (py - halfRes + 0.5) / halfRes;
+      const distSq_render = dx_render * dx_render + dy_render * dy_render;
+
+      if (distSq_render > 1.0) continue; // Outside atmosphere render bounds
+
+      // Calculate atmosphere 3D hemisphere coordinates to find normal and apply lighting
+      const dz_render = Math.sqrt(Math.max(0, 1.0 - distSq_render));
+      const dot_atmo = dx_render * L.x + dy_render * L.y + dz_render * L.z;
+      // Map dot_atmo to a light multiplier that dims the shadow side of the atmosphere
+      const atmoLight = Math.max(0.04, Math.min(1.0, (dot_atmo + 0.25) / 1.15));
+
+      // Convert coordinates back to original screenR_cloud scale
+      const cMult_render = 1.30 / 1.12; // screenR_render / screenR_cloud
+      const dx = dx_render * cMult_render;
+      const dy = dy_render * cMult_render;
       const distSq = dx * dx + dy * dy;
 
-      if (distSq > 1.0) continue; // Outside cloud layer bounds
+      if (distSq > 1.0) {
+        // --- Pixelated Fading Atmosphere Glow Outside Clouds ---
+        const dist = Math.sqrt(distSq);
+        const maxDist = 1.30 / 1.12;
+        const t = (dist - 1.0) / (maxDist - 1.0);
+        // Fades beautifully outwards and respects global shading
+        const opacity = Math.max(0, 0.40 * Math.pow(1 - t, 1.4)) * atmoLight;
+        if (opacity > 0.01) {
+          ctx.fillStyle = hexToRgba(cache.style.primaryColor, opacity);
+          ctx.fillRect(colStart, rowStart, w, h_px);
+        }
+        continue;
+      }
 
       let isCloudPixel = false;
       let cloudColor = '';
@@ -700,6 +742,9 @@ function draw3DPlanetWithLayers(
         if (ch > 0.16) {
           isCloudPixel = true;
           const dot_c = dx * L.x + dy * L.y + dz_c * L.z;
+          // Atmospheric light intensity on cloud layer
+          const cloudLight = Math.max(0.06, Math.min(1.0, (dot_c + 0.35) / 1.15));
+
           if (dot_c > 0.22) {
             cloudColor = '#ffffff';
           } else if (dot_c > -0.25) {
@@ -707,17 +752,15 @@ function draw3DPlanetWithLayers(
           } else {
             cloudColor = '#475569';
           }
+
+          // Apply global directional light to clouds
+          cloudColor = getShadedColor(cloudColor, cloudLight);
         }
       }
 
       if (isCloudPixel) {
         ctx.fillStyle = cloudColor;
-        ctx.fillRect(
-          Math.floor(startX + px * pixelSize),
-          Math.floor(startY + py * pixelSize),
-          Math.ceil(pixelSize),
-          Math.ceil(pixelSize)
-        );
+        ctx.fillRect(colStart, rowStart, w, h_px);
         continue;
       }
 
@@ -730,12 +773,7 @@ function draw3DPlanetWithLayers(
         // Crisp outline around the core
         if (distSq_p > 0.91) {
           ctx.fillStyle = '#080c1d';
-          ctx.fillRect(
-            Math.floor(startX + px * pixelSize),
-            Math.floor(startY + py * pixelSize),
-            Math.ceil(pixelSize),
-            Math.ceil(pixelSize)
-          );
+          ctx.fillRect(colStart, rowStart, w, h_px);
           continue;
         }
 
@@ -755,6 +793,9 @@ function draw3DPlanetWithLayers(
         const h = noise.fbm(rx * 1.8, ry * 1.8, rz * 1.8, 3);
 
         const dot_p = dx_p * L.x + dy_p * L.y + dz_p * L.z;
+        // Surface illumination intensity that drops off smoothly into space shadow
+        const surfLight = Math.max(0.08, Math.min(1.0, (dot_p + 0.30) / 1.10));
+
         let shadeIndex = 1; // Midtone
         if (dot_p > 0.22) {
           shadeIndex = 2; // Highlight
@@ -777,13 +818,23 @@ function draw3DPlanetWithLayers(
           terrainColor = palette.mountain[shadeIndex];
         }
 
+        // Apply global directional light to terrain
+        terrainColor = getShadedColor(terrainColor, surfLight);
+
         ctx.fillStyle = terrainColor;
-        ctx.fillRect(
-          Math.floor(startX + px * pixelSize),
-          Math.floor(startY + py * pixelSize),
-          Math.ceil(pixelSize),
-          Math.ceil(pixelSize)
-        );
+        ctx.fillRect(colStart, rowStart, w, h_px);
+      } else {
+        // Inside cloud bounds but outside planet surface, and not a cloud pixel!
+        // Draw the pixelated atmosphere here
+        const dist = Math.sqrt(distSq);
+        const maxDist = 1.30 / 1.12;
+        const t = (dist - 1.0) / (maxDist - 1.0);
+        // Fades beautifully outwards and respects global shading
+        const opacity = Math.max(0, 0.40 * Math.pow(1 - t, 1.4)) * atmoLight;
+        if (opacity > 0.01) {
+          ctx.fillStyle = hexToRgba(cache.style.primaryColor, opacity);
+          ctx.fillRect(colStart, rowStart, w, h_px);
+        }
       }
     }
   }
@@ -791,39 +842,10 @@ function draw3DPlanetWithLayers(
   // --- Draw FRONT Particles of the 3D Ring ---
   drawRingParticles(frontParticles);
 
-  // --- 3. Beautiful Volumetric Atmosphere Glow Overlay (peaking at limb, soft overall, sharp outer falloff) ---
-  const frontGlowRad = screenR * 1.35;
-  const frontGlow = ctx.createRadialGradient(
-    projCenter.x,
-    projCenter.y,
-    0, // start from center of planet
-    projCenter.x,
-    projCenter.y,
-    frontGlowRad
-  );
-  frontGlow.addColorStop(0, hexToRgba(cache.style.primaryColor, 0.10)); // soft overall facial haze
-  frontGlow.addColorStop(0.65, hexToRgba(cache.style.primaryColor, 0.15));
-  frontGlow.addColorStop(0.72, hexToRgba(cache.style.primaryColor, 0.45)); // maximum scattering near limb
-  frontGlow.addColorStop(0.74, hexToRgba(cache.style.primaryColor, 0.20)); // falls off rapidly at edge
-  frontGlow.addColorStop(0.85, hexToRgba(cache.style.primaryColor, 0.03)); // almost gone just outside
-  frontGlow.addColorStop(1, 'transparent');
 
-  ctx.fillStyle = frontGlow;
-  ctx.beginPath();
-  ctx.arc(projCenter.x, projCenter.y, frontGlowRad, 0, Math.PI * 2);
-  ctx.fill();
-
-  // Pulse effect if selected or hovered
-  if (isHovered) {
-    ctx.strokeStyle = 'rgba(255, 255, 255, 0.45)';
-    ctx.lineWidth = 1.5;
-    ctx.beginPath();
-    ctx.arc(projCenter.x, projCenter.y, screenR + 4 + Math.sin(Date.now() * 0.01) * 2, 0, Math.PI * 2);
-    ctx.stroke();
-  }
 }
 
-// Draw any beautiful, flat helper circles on the 3D plane in perspective projection
+// Draw elegant flat horizontal helper circles on the 3D plane in perspective projection
 function draw3DFlatCircle(
   ctx: CanvasRenderingContext2D,
   cx: number,
@@ -843,8 +865,9 @@ function draw3DFlatCircle(
   if (lineDash) ctx.setLineDash(lineDash);
 
   ctx.beginPath();
-  const steps = 40;
+  const steps = 60;
   const angleRange = endAngle - startAngle;
+
   for (let i = 0; i <= steps; i++) {
     const a = startAngle + (i / steps) * angleRange;
     const wx = cx + Math.cos(a) * r;
@@ -857,7 +880,55 @@ function draw3DFlatCircle(
   if (lineDash) ctx.setLineDash([]);
 }
 
-// Procedurally draws beautiful 3D spacecraft scaling with perspective camera depth
+// Draw elegant tilted helper circles on the 3D plane in perspective projection
+function draw3DTiltedCircle(
+  ctx: CanvasRenderingContext2D,
+  cx: number,
+  cy: number,
+  r: number,
+  camFocus: { x: number; y: number },
+  width: number,
+  height: number,
+  strokeStyle: string,
+  lineWidth: number,
+  lineDash?: number[],
+  startAngle = 0,
+  endAngle = Math.PI * 2
+) {
+  ctx.strokeStyle = strokeStyle;
+  ctx.lineWidth = lineWidth;
+  if (lineDash) ctx.setLineDash(lineDash);
+
+  ctx.beginPath();
+  const steps = 60;
+  const angleRange = endAngle - startAngle;
+
+  // 18-degree axial tilt to make it look visually magnificent and tilted
+  const beta = 0.31; // pitch tilt of ring plane
+  const alpha = 0.8; // yaw rotation of ring plane
+
+  for (let i = 0; i <= steps; i++) {
+    const a = startAngle + (i / steps) * angleRange;
+    const rx0 = r * Math.cos(a);
+    const ry0 = r * Math.sin(a);
+    
+    const rx1 = rx0;
+    const ry1 = ry0 * Math.cos(beta);
+    const rz1 = ry0 * Math.sin(beta);
+    
+    const wx = cx + (rx1 * Math.cos(alpha) - ry1 * Math.sin(alpha));
+    const wy = cy + (rx1 * Math.sin(alpha) + ry1 * Math.cos(alpha));
+    const wz = rz1;
+
+    const proj = projectPoint(wx, wy, wz, camFocus, width, height);
+    if (i === 0) ctx.moveTo(proj.x, proj.y);
+    else ctx.lineTo(proj.x, proj.y);
+  }
+  ctx.stroke();
+  if (lineDash) ctx.setLineDash([]);
+}
+
+// Procedurally draws beautiful, high-detail 3D spacecraft scaling with perspective camera depth
 function draw3DShip(
   ctx: CanvasRenderingContext2D,
   type: ShipType,
@@ -869,106 +940,293 @@ function draw3DShip(
   isMoving: boolean,
   camFocus: { x: number; y: number },
   width: number,
-  height: number
+  height: number,
+  planetCenter?: { x: number; y: number; z?: number },
+  velo3D?: { x: number; y: number; z: number }
 ) {
-  const scale = type === ShipType.DREADNOUGHT ? 1.25 : type === ShipType.FRIGATE ? 1.0 : 0.85;
+  const scale = (type === ShipType.DREADNOUGHT ? 0.90 : type === ShipType.FRIGATE ? 0.72 : type === ShipType.SPY ? 0.58 : 0.52) * 2.0;
   const baseRgb = hexToRgb(baseColorHex) || { r: 255, g: 255, b: 255 };
 
+  interface ShipFace {
+    indices: number[];
+    isGlow?: boolean;
+    glowColor?: string;
+    isDarkPanel?: boolean;
+  }
+
   let vertices: Vertex3D[] = [];
-  let faces: number[][] = [];
+  let faces: ShipFace[] = [];
 
   if (type === ShipType.SCOUT) {
+    // High-speed Interceptor: Sleek needle nose, dual delta wings, glowing canopy
     vertices = [
-      { x: 10, y: 0, z: 0 },
-      { x: -8, y: -6, z: -1.5 },
-      { x: -8, y: 6, z: -1.5 },
-      { x: -3, y: 0, z: 4 },
-      { x: -4, y: 0, z: -2.5 },
+      { x: 18, y: 0, z: 0 },       // 0: Nose tip
+      { x: 3, y: 0, z: 3.5 },       // 1: Canopy top peak
+      { x: 3, y: 0, z: -2.0 },      // 2: Belly mid
+      { x: -6, y: -13, z: -1.0 },   // 3: Left wingtip
+      { x: -6, y: 13, z: -1.0 },    // 4: Right wingtip
+      { x: -4, y: -4, z: 1.0 },     // 5: Left wing root top
+      { x: -4, y: 4, z: 1.0 },      // 6: Right wing root top
+      { x: -14, y: 0, z: 5.5 },     // 7: Tail fin top peak
+      { x: -14, y: -4, z: -0.5 },   // 8: Left engine nozzle
+      { x: -14, y: 4, z: -0.5 },    // 9: Right engine nozzle
+      { x: 10, y: 0, z: 1.5 },      // 10: Canopy front slope
     ];
     faces = [
-      [0, 2, 3],
-      [0, 3, 1],
-      [0, 1, 4],
-      [0, 4, 2],
-      [1, 3, 2, 4],
+      // Cockpit Windshield (Glowing Cyan Accent)
+      { indices: [0, 10, 1], isGlow: true, glowColor: '#38bdf8' },
+      { indices: [10, 6, 1], isGlow: true, glowColor: '#0284c7' },
+      { indices: [10, 1, 5], isGlow: true, glowColor: '#0284c7' },
+
+      // Nose & Upper Fuselage
+      { indices: [0, 5, 10] },
+      { indices: [0, 10, 6] },
+      { indices: [0, 2, 5] },
+      { indices: [0, 6, 2] },
+
+      // Wings Top
+      { indices: [10, 3, 5], isDarkPanel: true },
+      { indices: [10, 6, 4], isDarkPanel: true },
+      { indices: [5, 3, 8] },
+      { indices: [6, 9, 4] },
+
+      // Wings Bottom
+      { indices: [2, 3, 8] },
+      { indices: [2, 9, 4] },
+
+      // Tail Vertical Stabilizer Fin
+      { indices: [1, 7, 8] },
+      { indices: [1, 9, 7] },
+
+      // Engine Exhaust Rear
+      { indices: [8, 7, 9], isGlow: true, glowColor: '#f97316' },
     ];
   } else if (type === ShipType.FRIGATE) {
+    // Heavy Escort Frigate: Wedge bow, dorsal bridge, side weapon sponsons, quad engines
     vertices = [
-      { x: 12, y: 0, z: 1 },
-      { x: 3, y: -4.5, z: -1.5 },
-      { x: 3, y: 4.5, z: -1.5 },
-      { x: -11, y: -6, z: 0 },
-      { x: -11, y: 6, z: 0 },
-      { x: -3, y: 0, z: 5.5 },
+      { x: 22, y: -3.5, z: 0.5 },   // 0: Left bow tip
+      { x: 22, y: 3.5, z: 0.5 },    // 1: Right bow tip
+      { x: 14, y: 0, z: -2.0 },     // 2: Bow center notch
+      { x: 6, y: 0, z: 6.5 },       // 3: Dorsal bridge peak
+      { x: 12, y: 0, z: 3.0 },      // 4: Bridge visor front
+      { x: -6, y: -15, z: -1.5 },   // 5: Left wingtip sponson
+      { x: -6, y: 15, z: -1.5 },    // 6: Right wingtip sponson
+      { x: -2, y: -6, z: 2.0 },     // 7: Upper left hull ridge
+      { x: -2, y: 6, z: 2.0 },      // 8: Upper right hull ridge
+      { x: -16, y: -6, z: 1.0 },    // 9: Stern left engine bay
+      { x: -16, y: 6, z: 1.0 },     // 10: Stern right engine bay
+      { x: -16, y: 0, z: -3.5 },    // 11: Stern lower keel
     ];
     faces = [
-      [0, 2, 5], [0, 5, 1],
-      [1, 5, 3], [2, 4, 5],
-      [1, 3, 0], [2, 0, 4],
-      [3, 4, 5],
+      // Command Bridge Visor (Glowing Amber Accent)
+      { indices: [4, 3, 7], isGlow: true, glowColor: '#fbbf24' },
+      { indices: [4, 8, 3], isGlow: true, glowColor: '#f59e0b' },
+
+      // Bow Prow Plates
+      { indices: [0, 4, 1] },
+      { indices: [0, 2, 4] },
+      { indices: [1, 4, 2] },
+
+      // Hull Sponsons / Wings
+      { indices: [0, 7, 5], isDarkPanel: true },
+      { indices: [1, 6, 8], isDarkPanel: true },
+      { indices: [5, 7, 9] },
+      { indices: [6, 10, 8] },
+
+      // Dorsal Armor Deck
+      { indices: [3, 9, 7] },
+      { indices: [3, 8, 10] },
+      { indices: [3, 10, 9] },
+
+      // Keel & Underbelly
+      { indices: [2, 5, 11] },
+      { indices: [2, 11, 6] },
+
+      // Thruster Exhaust Block
+      { indices: [9, 10, 11], isGlow: true, glowColor: '#a855f7' },
     ];
   } else if (type === ShipType.DREADNOUGHT) {
+    // Capital Battlecruiser: Heavy armored prow, dual broadside decks, towering bridge, quad heavy engines
     vertices = [
-      { x: 19, y: 0, z: 0 },
-      { x: -13, y: -12, z: -3 },
-      { x: -13, y: 12, z: -3 },
-      { x: -3, y: 0, z: 5.5 },
-      { x: -13, y: 0, z: 2.5 },
+      { x: 28, y: 0, z: 1.0 },      // 0: Prow ramming tip
+      { x: 18, y: -4, z: 4.5 },     // 1: Bow upper left ridge
+      { x: 18, y: 4, z: 4.5 },      // 2: Bow upper right ridge
+      { x: 16, y: 0, z: -4.5 },     // 3: Bow lower keel
+      { x: 0, y: -19, z: -1.5 },    // 4: Left broadside wingtip
+      { x: 0, y: 19, z: -1.5 },     // 5: Right broadside wingtip
+      { x: -4, y: 0, z: 11.5 },     // 6: Citadel Command Tower Top
+      { x: 4, y: 0, z: 7.0 },       // 7: Citadel Bridge Front
+      { x: -20, y: -9, z: 0.5 },    // 8: Stern left thruster casing
+      { x: -20, y: 9, z: 0.5 },     // 9: Stern right thruster casing
+      { x: -22, y: 0, z: -2.5 },    // 10: Stern main center exhaust
+      { x: -8, y: -8, z: 3.0 },     // 11: Middeck left armor plate
+      { x: -8, y: 8, z: 3.0 },      // 12: Middeck right armor plate
     ];
     faces = [
-      [0, 2, 3], [0, 3, 1],
-      [1, 3, 4], [2, 4, 3],
-      [0, 1, 2],
-      [1, 4, 2],
+      // Citadel Command Visor (Glowing Royal Blue/Cyan)
+      { indices: [7, 6, 11], isGlow: true, glowColor: '#38bdf8' },
+      { indices: [7, 12, 6], isGlow: true, glowColor: '#0284c7' },
+
+      // Heavy Prow Armor Shield
+      { indices: [0, 1, 7] },
+      { indices: [0, 7, 2] },
+      { indices: [0, 3, 1] },
+      { indices: [0, 2, 3] },
+
+      // Broadside Deck Wings
+      { indices: [1, 4, 11], isDarkPanel: true },
+      { indices: [2, 12, 5], isDarkPanel: true },
+      { indices: [4, 8, 11] },
+      { indices: [5, 12, 9] },
+
+      // Middeck Citadel Spire
+      { indices: [7, 11, 12] },
+      { indices: [6, 8, 11] },
+      { indices: [6, 12, 9] },
+
+      // Underbelly Keel Armor
+      { indices: [3, 4, 10] },
+      { indices: [3, 10, 5] },
+
+      // Heavy Stern Engine Quad Exhaust
+      { indices: [8, 9, 10], isGlow: true, glowColor: '#38bdf8' },
     ];
   } else {
-    // Spy
+    // Spy Stealth Vessel: Diamond razor wing, glowing sensor dome
     vertices = [
-      { x: 11, y: 0, z: 0 },
-      { x: 0, y: -5, z: 0 },
-      { x: 0, y: 5.5, z: 0 },
-      { x: -9, y: 0, z: 0 },
-      { x: 0, y: 0, z: 3.5 },
-      { x: 0, y: 0, z: -3.5 },
+      { x: 18, y: 0, z: 0 },        // 0: Stealth prow tip
+      { x: -6, y: -16, z: -1.0 },   // 1: Left razor wingtip
+      { x: -6, y: 16, z: -1.0 },    // 2: Right razor wingtip
+      { x: 0, y: 0, z: 5.0 },       // 3: Stealth sensor dome top
+      { x: 6, y: 0, z: 2.5 },       // 4: Sensor dome front slope
+      { x: -14, y: -6, z: 2.0 },    // 5: Left tail fin peak
+      { x: -14, y: 6, z: 2.0 },     // 6: Right tail fin peak
+      { x: -14, y: 0, z: -2.5 },    // 7: Rear stealth engine port
     ];
     faces = [
-      [0, 2, 4], [0, 4, 1], [3, 1, 4], [3, 4, 2],
-      [0, 5, 2], [0, 1, 5], [3, 1, 5], [3, 5, 2],
+      // Stealth Sensor Dome (Glowing Purple Crystal Matrix)
+      { indices: [4, 3, 1], isGlow: true, glowColor: '#c084fc' },
+      { indices: [4, 2, 3], isGlow: true, glowColor: '#a855f7' },
+
+      // Stealth Faceted Top Wings
+      { indices: [0, 4, 1] },
+      { indices: [0, 2, 4] },
+      { indices: [1, 5, 7] },
+      { indices: [2, 7, 6] },
+
+      // Belly Stealth Hull
+      { indices: [0, 1, 7], isDarkPanel: true },
+      { indices: [0, 7, 2], isDarkPanel: true },
+
+      // Twin Tail Fins
+      { indices: [3, 5, 7] },
+      { indices: [3, 7, 6] },
+
+      // Engine Glow
+      { indices: [5, 6, 7], isGlow: true, glowColor: '#e066ff' },
     ];
   }
 
-  const cosH = Math.cos(headingAngle);
-  const sinH = Math.sin(headingAngle);
+  // 1. Calculate Forward Unit Vector f
+  let fx = Math.cos(headingAngle);
+  let fy = Math.sin(headingAngle);
+  let fz = 0;
 
-  // Rotate, translate, and project vertices using our 3D perspective projection
-  const projected = vertices.map((v) => {
+  if (velo3D) {
+    const vMag = Math.sqrt(velo3D.x * velo3D.x + velo3D.y * velo3D.y + velo3D.z * velo3D.z);
+    if (vMag > 0.0001) {
+      fx = velo3D.x / vMag;
+      fy = velo3D.y / vMag;
+      fz = velo3D.z / vMag;
+    }
+  }
+
+  // 2. Calculate Gravity Up Unit Vector u (Roof/top points along +u, Belly/ground points along -u towards planet center)
+  let ux = 0;
+  let uy = 0;
+  let uz = 1;
+
+  if (planetCenter) {
+    const pcZ = planetCenter.z ?? 0;
+    const rx = sx - planetCenter.x;
+    const ry = sy - planetCenter.y;
+    const rz = sz - pcZ;
+    const rMag = Math.sqrt(rx * rx + ry * ry + rz * rz);
+
+    if (rMag > 0.001) {
+      // Radially outward vector from planet center to ship
+      const urx = rx / rMag;
+      const ury = ry / rMag;
+      const urz = rz / rMag;
+
+      // Orthonormalize u against f
+      const dotUF = urx * fx + ury * fy + urz * fz;
+      let ox = urx - dotUF * fx;
+      let oy = ury - dotUF * fy;
+      let oz = urz - dotUF * fz;
+      const oMag = Math.sqrt(ox * ox + oy * oy + oz * oz);
+
+      if (oMag > 0.001) {
+        ux = ox / oMag;
+        uy = oy / oMag;
+        uz = oz / oMag;
+      }
+    }
+  }
+
+  // 3. Calculate Right/Starboard Unit Vector s = u x f
+  let sx_unit = uy * fz - uz * fy;
+  let sy_unit = uz * fx - ux * fz;
+  let sz_unit = ux * fy - uy * fx;
+  const sMag = Math.sqrt(sx_unit * sx_unit + sy_unit * sy_unit + sz_unit * sz_unit);
+  if (sMag > 0.001) {
+    sx_unit /= sMag;
+    sy_unit /= sMag;
+    sz_unit /= sMag;
+  }
+
+  // Rotate, translate, and project vertices using full 3D orthonormal basis matrix
+  interface TransformedVertex {
+    rx: number;
+    ry: number;
+    rz: number;
+    projected: { x: number; y: number; z: number; scale: number };
+  }
+
+  const transformedVertices: TransformedVertex[] = vertices.map((v) => {
     const lx = v.x * scale;
     const ly = v.y * scale;
     const lz = v.z * scale;
 
-    const rx = lx * cosH - ly * sinH;
-    const ry = lx * sinH + ly * cosH;
-    const rz = lz;
+    const rx = lx * fx + ly * sx_unit + lz * ux;
+    const ry = lx * fy + ly * sy_unit + lz * uy;
+    const rz = lx * fz + ly * sz_unit + lz * uz;
 
     const wx = sx + rx;
     const wy = sy + ry;
     const wz = sz + rz;
 
-    return projectPoint(wx, wy, wz, camFocus, width, height);
+    return {
+      rx, ry, rz,
+      projected: projectPoint(wx, wy, wz, camFocus, width, height)
+    };
   });
+
+  const projected = transformedVertices.map((tv) => tv.projected);
 
   const light = { x: -0.5, y: -0.5, z: 0.7 };
   const mag = Math.sqrt(light.x * light.x + light.y * light.y + light.z * light.z);
   light.x /= mag; light.y /= mag; light.z /= mag;
 
-  const faceDepths = faces.map((face, index) => {
-    const sumZ = face.reduce((acc, idx) => acc + projected[idx].z, 0);
-    return { index, avgZ: sumZ / face.length };
+  const faceDepths = faces.map((faceObj, index) => {
+    const sumZ = faceObj.indices.reduce((acc, idx) => acc + projected[idx].z, 0);
+    return { index, avgZ: sumZ / faceObj.indices.length };
   });
   faceDepths.sort((a, b) => a.avgZ - b.avgZ);
 
   faceDepths.forEach(({ index }) => {
-    const face = faces[index];
+    const faceObj = faces[index];
+    const face = faceObj.indices;
     const p0 = projected[face[0]];
     const p1 = projected[face[1]];
     const p2 = projected[face[2]];
@@ -976,48 +1234,43 @@ function draw3DShip(
     const val = (p1.x - p0.x) * (p2.y - p0.y) - (p1.y - p0.y) * (p2.x - p0.x);
     if (val >= 0) return;
 
-    const v0 = vertices[face[0]];
-    const v1 = vertices[face[1]];
-    const v2 = vertices[face[2]];
+    const tv0 = transformedVertices[face[0]];
+    const tv1 = transformedVertices[face[1]];
+    const tv2 = transformedVertices[face[2]];
 
-    const rx0 = v0.x * cosH - v0.y * sinH;
-    const ry0 = v0.x * sinH + v0.y * cosH;
-    const rz0 = v0.z;
+    const ux_edge = tv1.rx - tv0.rx;
+    const uy_edge = tv1.ry - tv0.ry;
+    const uz_edge = tv1.rz - tv0.rz;
 
-    const rx1 = v1.x * cosH - v1.y * sinH;
-    const ry1 = v1.x * sinH + v1.y * cosH;
-    const rz1 = v1.z;
+    const wx_edge = tv2.rx - tv0.rx;
+    const wy_edge = tv2.ry - tv0.ry;
+    const wz_edge = tv2.rz - tv0.rz;
 
-    const rx2 = v2.x * cosH - v2.y * sinH;
-    const ry2 = v2.x * sinH + v2.y * cosH;
-    const rz2 = v2.z;
-
-    const ux = rx1 - rx0;
-    const uy = ry1 - ry0;
-    const uz = rz1 - rz0;
-
-    const wx = rx2 - rx0;
-    const wy = ry2 - ry0;
-    const wz = rz2 - rz0;
-
-    let nx = uy * wz - uz * wy;
-    let ny = uz * wx - ux * wz;
-    let nz = ux * wy - uy * wx;
+    let nx = uy_edge * wz_edge - uz_edge * wy_edge;
+    let ny = uz_edge * wx_edge - ux_edge * wz_edge;
+    let nz = ux_edge * wy_edge - uy_edge * wx_edge;
     const nMag = Math.sqrt(nx * nx + ny * ny + nz * nz);
     if (nMag > 0) {
       nx /= nMag; ny /= nMag; nz /= nMag;
     }
 
     const dot = nx * light.x + ny * light.y + nz * light.z;
-    const brightness = Math.max(0.25, (dot + 1) / 2);
+    const brightness = Math.max(0.30, (dot + 1) / 2);
 
-    const r = Math.round(baseRgb.r * brightness);
-    const g = Math.round(baseRgb.g * brightness);
-    const b = Math.round(baseRgb.b * brightness);
+    if (faceObj.isGlow && faceObj.glowColor) {
+      ctx.fillStyle = faceObj.glowColor;
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = 0.8;
+    } else {
+      const mult = faceObj.isDarkPanel ? 0.65 : 1.0;
+      const r = Math.round(baseRgb.r * brightness * mult);
+      const g = Math.round(baseRgb.g * brightness * mult);
+      const b = Math.round(baseRgb.b * brightness * mult);
 
-    ctx.fillStyle = `rgb(${r}, ${g}, ${b})`;
-    ctx.strokeStyle = `rgba(${Math.round(r * 1.2)}, ${Math.round(g * 1.2)}, ${Math.round(b * 1.2)}, 0.45)`;
-    ctx.lineWidth = 0.5;
+      ctx.fillStyle = `rgb(${r}, ${g}, ${b})`;
+      ctx.strokeStyle = `rgba(${Math.min(255, Math.round(r * 1.35))}, ${Math.min(255, Math.round(g * 1.35))}, ${Math.min(255, Math.round(b * 1.35))}, 0.55)`;
+      ctx.lineWidth = 0.7;
+    }
 
     ctx.beginPath();
     ctx.moveTo(p0.x, p0.y);
@@ -1030,17 +1283,22 @@ function draw3DShip(
   });
 
   if (isMoving) {
-    const rearX = sx - cosH * 11 * scale;
-    const rearY = sy - sinH * 11 * scale;
-    const rearZ = sz;
+    // Engine thruster particle jet
+    for (let d = 1; d <= 4; d++) {
+      const trailDist = (d * 5 + Math.random() * 2) * scale;
+      const rearX = sx - fx * trailDist;
+      const rearY = sy - fy * trailDist;
+      const rearZ = sz - fz * trailDist;
 
-    const projRear = projectPoint(rearX, rearY, rearZ, camFocus, width, height);
+      const projRear = projectPoint(rearX, rearY, rearZ, camFocus, width, height);
+      const alpha = (0.85 - d * 0.18) * (0.65 + Math.random() * 0.35);
 
-    ctx.fillStyle = type === ShipType.DREADNOUGHT ? '#38bdf8' : '#f97316';
-    ctx.globalAlpha = 0.65 + Math.random() * 0.35;
-    ctx.beginPath();
-    ctx.arc(projRear.x, projRear.y, 4 * projRear.scale, 0, Math.PI * 2);
-    ctx.fill();
+      ctx.fillStyle = type === ShipType.DREADNOUGHT ? '#38bdf8' : type === ShipType.FRIGATE ? '#a855f7' : '#f97316';
+      ctx.globalAlpha = Math.max(0, alpha);
+      ctx.beginPath();
+      ctx.arc(projRear.x, projRear.y, Math.max(0.4, (6.0 - d * 1.1) * projRear.scale * 0.65), 0, Math.PI * 2);
+      ctx.fill();
+    }
     ctx.globalAlpha = 1.0;
   }
 }
@@ -1053,9 +1311,9 @@ const generateBackgroundAssets = (): { stars: BackgroundStar[]; nebulae: Backgro
   const rand = seededRandom('galaxy_nebula_field_seed_882');
 
   // Distant twinkling stellar field
-  for (let i = 0; i < 200; i++) {
+  for (let i = 0; i < 350; i++) {
     const depth = 0.04 + rand() * 0.16;
-    const size = 0.5 + rand() * 1.6;
+    const size = 0.35 + rand() * 1.15;
 
     const starColors = ['#ffffff', '#e0f2fe', '#bae6fd', '#fed7aa', '#fecdd3', '#fef08a'];
     const color = starColors[Math.floor(rand() * starColors.length)];
@@ -1084,24 +1342,48 @@ const generateBackgroundAssets = (): { stars: BackgroundStar[]; nebulae: Backgro
     });
   }
 
-  // Giant colorful cosmic gas clouds (nebulae)
-  const nebulaColors = [
-    'rgba(29, 78, 216, 0.16)',  // Sapphire Blue
-    'rgba(124, 58, 237, 0.14)', // Royal Purple
-    'rgba(6, 182, 212, 0.10)',  // Electric Cyan/Teal
-    'rgba(219, 39, 119, 0.09)', // Magenta Dust
-    'rgba(3, 7, 18, 0.40)',     // Cosmic void dark dust cloud (creates silhouettes!)
-    'rgba(37, 99, 235, 0.12)',  // Cobalt Blue
-    'rgba(109, 40, 217, 0.11)', // Violet Glimmer
-  ];
-  // Generate 12 overlapping nebulae for deep volumetric layering
-  for (let i = 0; i < 12; i++) {
-    const depth = 0.03 + (i % 3) * 0.05; // 0.03, 0.08, 0.13 for multi-level parallax depth
+  // Overlapping nebulae for deep volumetric layering
+  // Left side gets blue/cyan, right side gets red/purple, center gets mixed dark/cosmic dust
+  for (let i = 0; i < 15; i++) {
+    const depth = 0.03 + (i % 3) * 0.05; // parallax depth layering
+    const nebX = rand() * 1.4 - 0.2; // normalized x coordinate (ranges from -0.2 to 1.2)
+    const nebY = rand() * 1.4 - 0.2;
+    const radius = 220 + rand() * 260;
+
+    let color = '';
+    if (nebX < 0.45) {
+      // Friendly side: subtle blue/cyan nebulae
+      const blues = [
+        'rgba(30, 64, 175, 0.11)',  // Deep sapphire blue
+        'rgba(6, 182, 212, 0.07)',  // Electric cyan
+        'rgba(37, 99, 235, 0.09)',  // Cobalt blue
+        'rgba(14, 116, 144, 0.06)'  // Dark teal
+      ];
+      color = blues[Math.floor(rand() * blues.length)];
+    } else if (nebX > 0.55) {
+      // Enemy side: subtle red/purple nebulae
+      const reds = [
+        'rgba(185, 28, 28, 0.07)',  // Crimson red
+        'rgba(124, 58, 237, 0.08)', // Royal purple
+        'rgba(109, 40, 217, 0.07)', // Violet
+        'rgba(153, 27, 27, 0.06)'   // Dark wine red
+      ];
+      color = reds[Math.floor(rand() * reds.length)];
+    } else {
+      // Centered contested lane: mixed cosmic violet and dark silhouetted dust voids
+      const centers = [
+        'rgba(88, 28, 135, 0.07)',  // Cosmic purple dust
+        'rgba(3, 7, 18, 0.35)',     // Dense dark cosmic void dust (shadow blocker)
+        'rgba(124, 58, 237, 0.05)'  // Violet haze
+      ];
+      color = centers[Math.floor(rand() * centers.length)];
+    }
+
     nebulae.push({
-      x: rand() * 1.4 - 0.2, // extend beyond edges for panning support
-      y: rand() * 1.4 - 0.2,
-      radius: 250 + rand() * 300,
-      color: nebulaColors[i % nebulaColors.length],
+      x: nebX,
+      y: nebY,
+      radius,
+      color,
       depth,
     });
   }
@@ -1119,6 +1401,7 @@ export default function SpaceBattlefield({
 }: SpaceBattlefieldProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const bgCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
   // 3D Perspective Camera Focus (world coordinate space)
   const [camFocus, setCamFocus] = useState({ x: MAP_WIDTH / 2, y: MAP_HEIGHT / 2 });
@@ -1153,21 +1436,59 @@ export default function SpaceBattlefield({
     y: 0,
   });
 
+  // F3 Debug Overlay State
+  const [debugSettings, setDebugSettings] = useState<DebugSettings>(defaultDebugSettings);
+  currentDebugSettings = debugSettings; // Always keep in sync during render pass
+  const [fps, setFps] = useState(60);
+  const frameCountRef = useRef(0);
+  const lastFpsTimeRef = useRef(Date.now());
+
+  // Smooth client-side interpolation refs for lag-free 60fps ship movement & flight trails
+  const smoothProgressMapRef = useRef<Record<string, number>>({});
+  const smoothTrailMapRef = useRef<Record<string, Array<{ wx: number; wy: number; wz: number; time: number }>>>({});
+  const lastFrameTimeRef = useRef<number>(Date.now());
+
+  // Keep global debug reference updated
+  useEffect(() => {
+    currentDebugSettings = debugSettings;
+  }, [debugSettings]);
+
+  // Keyboard shortcut listener for F3 key
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'F3') {
+        e.preventDefault();
+        setDebugSettings((prev) => ({ ...prev, f3Open: !prev.f3Open }));
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
+
   // Particle list for combat spark explosions
   const sparksRef = useRef<{ x: number; y: number; vx: number; vy: number; color: string; life: number }[]>([]);
+  // Bullets list for combat scatter projectile fire
+  const bulletsRef = useRef<{ x: number; y: number; z: number; vx: number; vy: number; vz: number; color: string; life: number }[]>([]);
 
-  // Center camera Focus on Home planet initially when started
+  // Center camera Focus on the center of all planets initially when started
+  const centeredRef = useRef(false);
   useEffect(() => {
-    const myHome = Object.values(state.planets).find(
-      (p) => p.type === PlanetType.HOME && p.ownerId === playerId
-    );
-    if (myHome && containerRef.current) {
-      setCamFocus({
-        x: myHome.x,
-        y: myHome.y,
+    if (centeredRef.current) return;
+    const allPlanets = Object.values(state.planets);
+    if (allPlanets.length > 0) {
+      let sumX = 0;
+      let sumY = 0;
+      allPlanets.forEach((p) => {
+        sumX += p.x;
+        sumY += p.y;
       });
+      setCamFocus({
+        x: sumX / allPlanets.length,
+        y: sumY / allPlanets.length,
+      });
+      centeredRef.current = true;
     }
-  }, [state.gameStarted]);
+  }, [state]);
 
   // Handle canvas sizing correctly
   useEffect(() => {
@@ -1348,339 +1669,661 @@ export default function SpaceBattlefield({
     let animId: number;
 
     const render = () => {
+      // FPS measurement for F3 Debug Overlay
+      frameCountRef.current++;
+      const nowMs = Date.now();
+      if (nowMs - lastFpsTimeRef.current >= 500) {
+        setFps(Math.round((frameCountRef.current * 1000) / (nowMs - lastFpsTimeRef.current)));
+        frameCountRef.current = 0;
+        lastFpsTimeRef.current = nowMs;
+      }
+
+      const frameDeltaSec = Math.min(0.08, Math.max(0.001, (nowMs - (lastFrameTimeRef.current || nowMs)) / 1000));
+      lastFrameTimeRef.current = nowMs;
+
       // Update global zoom reference for 3D projections on each frame
       globalCurrentZoom = zoom;
 
-      // Clear with deep space backdrop gradient (deep navy to dark space indigo)
-      const spaceGrad = ctx.createRadialGradient(
-        canvas.width / 2,
-        canvas.height / 2,
-        10,
-        canvas.width / 2,
-        canvas.height / 2,
-        canvas.width * 0.95
-      );
-      spaceGrad.addColorStop(0, '#040714');   // subtle dark navy core
-      spaceGrad.addColorStop(0.5, '#020308'); // fades out
-      spaceGrad.addColorStop(1, '#000103');   // pitch black outer depth
-      ctx.fillStyle = spaceGrad;
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      // Render the entire background on a low-res buffer to create a beautiful, authentic retro "pixel art nebula" feel!
+      let bgCanvas = bgCanvasRef.current;
+      if (!bgCanvas) {
+        bgCanvas = document.createElement('canvas');
+        bgCanvasRef.current = bgCanvas;
+      }
 
-      // --- PARALLAX BACKGROUND DRAWING ---
+      const pixelScale = 5; // Each pixel is 5x5 screen pixels for a distinct retro texture feel
+      const bgW = Math.ceil(canvas.width / pixelScale);
+      const bgH = Math.ceil(canvas.height / pixelScale);
+      if (bgCanvas.width !== bgW || bgCanvas.height !== bgH) {
+        bgCanvas.width = bgW;
+        bgCanvas.height = bgH;
+      }
+
+      const bgCtx = bgCanvas.getContext('2d');
       const parallaxX = -camFocus.x;
       const parallaxY = -camFocus.y;
 
-      // 1. Draw Nebula Gaseous Clouds
-      bgAssets.nebulae.forEach((neb) => {
-        const px = (neb.x * canvas.width) + (parallaxX * neb.depth);
-        const py = (neb.y * canvas.height) + (parallaxY * neb.depth);
+      if (bgCtx) {
+        bgCtx.imageSmoothingEnabled = false;
 
-        const gradient = ctx.createRadialGradient(px, py, 10, px, py, neb.radius);
-        gradient.addColorStop(0, neb.color);
-        gradient.addColorStop(0.5, neb.color.replace('0.', '0.04'));
-        gradient.addColorStop(1, 'transparent');
+        // Clear low-res background with rich space gradient
+        const spaceGrad = bgCtx.createRadialGradient(
+          bgW / 2,
+          bgH / 2,
+          5,
+          bgW / 2,
+          bgH / 2,
+          bgW * 0.95
+        );
+        spaceGrad.addColorStop(0, '#040714');   // Deep space core
+        spaceGrad.addColorStop(0.5, '#020308'); // Dark depth
+        spaceGrad.addColorStop(1, '#000103');   // Pitch black
+        bgCtx.fillStyle = spaceGrad;
+        bgCtx.fillRect(0, 0, bgW, bgH);
 
-        ctx.fillStyle = gradient;
-        ctx.beginPath();
-        ctx.arc(px, py, neb.radius, 0, Math.PI * 2);
-        ctx.fill();
-      });
+        // 1. Draw Beautiful Pixelated Nebula Gaseous Clouds
+        bgAssets.nebulae.forEach((neb) => {
+          const px = (neb.x * bgW) + ((parallaxX / pixelScale) * neb.depth);
+          const py = (neb.y * bgH) + ((parallaxY / pixelScale) * neb.depth);
+          const radius = neb.radius / pixelScale;
 
-      // 2. Draw Twinkling Stars
-      bgAssets.stars.forEach((star) => {
-        // Warp around screen boundaries infinitely
-        const px = ((star.x * canvas.width + parallaxX * star.depth) % canvas.width + canvas.width) % canvas.width;
-        const py = ((star.y * canvas.height + parallaxY * star.depth) % canvas.height + canvas.height) % canvas.height;
+          const gradient = bgCtx.createRadialGradient(px, py, 2, px, py, radius);
+          gradient.addColorStop(0, neb.color);
+          gradient.addColorStop(0.4, neb.color.replace('0.', '0.05'));
+          gradient.addColorStop(0.8, 'transparent');
 
-        const twinkle = Math.sin(Date.now() * star.twinkleSpeed + star.twinkleOffset) * 0.45 + 0.55;
-        ctx.globalAlpha = twinkle;
-        ctx.fillStyle = star.color;
+          bgCtx.fillStyle = gradient;
+          bgCtx.beginPath();
+          bgCtx.arc(px, py, radius, 0, Math.PI * 2);
+          bgCtx.fill();
+        });
 
-        if (star.size > 2.5) {
-          ctx.beginPath();
-          ctx.arc(px, py, star.size, 0, Math.PI * 2);
-          ctx.fill();
+        // 2. Draw Pixelated Twinkling Stars
+        bgAssets.stars.forEach((star) => {
+          const px = ((star.x * bgW + (parallaxX / pixelScale) * star.depth) % bgW + bgW) % bgW;
+          const py = ((star.y * bgH + (parallaxY / pixelScale) * star.depth) % bgH + bgH) % bgH;
 
-          // Horizontal/Vertical diffraction glow spikes
-          ctx.strokeStyle = 'rgba(255, 255, 255, 0.28)';
-          ctx.lineWidth = 0.5;
-          ctx.beginPath();
-          ctx.moveTo(px - 10, py);
-          ctx.lineTo(px + 10, py);
-          ctx.moveTo(px, py - 10);
-          ctx.lineTo(px, py + 10);
-          ctx.stroke();
-        } else {
-          ctx.fillRect(px, py, star.size, star.size);
-        }
-      });
-      ctx.globalAlpha = 1.0;
+          const twinkle = Math.sin(Date.now() * star.twinkleSpeed + star.twinkleOffset) * 0.45 + 0.55;
+          bgCtx.globalAlpha = twinkle;
+          bgCtx.fillStyle = star.color;
 
-      // --- 3D ENVIRONMENT GEOMETRIES ---
-      // 2.5. Draw Faint Curved Connection Lanes (Shipping routes) between adjacent planets
-      const drawnPairs = new Set<string>();
-      const planetList = Object.values(state.planets);
-      for (let i = 0; i < planetList.length; i++) {
-        for (let j = i + 1; j < planetList.length; j++) {
-          const pl1 = planetList[i];
-          const pl2 = planetList[j];
-          const dx = pl1.x - pl2.x;
-          const dy = pl1.y - pl2.y;
-          const dist = Math.sqrt(dx * dx + dy * dy);
-          
-          if (dist < 360) {
-            const pairId = pl1.id < pl2.id ? `${pl1.id}_${pl2.id}` : `${pl2.id}_${pl1.id}`;
-            if (!drawnPairs.has(pairId)) {
-              drawnPairs.add(pairId);
-              
-              // Draw an elegant curved tactical connection route
-              ctx.strokeStyle = 'rgba(255, 255, 255, 0.05)';
-              ctx.lineWidth = 1.2;
-              ctx.beginPath();
-              
-              const steps = 24;
-              const px = -(pl2.y - pl1.y) / dist;
-              const py = (pl2.x - pl1.x) / dist;
-              const curveIntensity = 30 * (dist / 300); 
-              
-              for (let k = 0; k <= steps; k++) {
-                const t = k / steps;
-                const lx = pl1.x + (pl2.x - pl1.x) * t;
-                const ly = pl1.y + (pl2.y - pl1.y) * t;
-                const disp = Math.sin(t * Math.PI) * curveIntensity;
-                const wx = lx + px * disp;
-                const wy = ly + py * disp;
-                
-                const proj = projectPoint(wx, wy, 0, camFocus, canvas.width, canvas.height);
-                if (k === 0) ctx.moveTo(proj.x, proj.y);
-                else ctx.lineTo(proj.x, proj.y);
-              }
-              ctx.stroke();
-            }
+          if (star.size > 2.5) {
+            // Retro cross diffraction lens flare
+            bgCtx.fillRect(Math.floor(px - 1), Math.floor(py), 3, 1);
+            bgCtx.fillRect(Math.floor(px), Math.floor(py - 1), 1, 3);
+            bgCtx.fillStyle = '#ffffff';
+            bgCtx.fillRect(Math.floor(px), Math.floor(py), 1, 1);
+          } else {
+            const size = Math.max(1, Math.round(star.size / pixelScale));
+            bgCtx.fillRect(Math.floor(px), Math.floor(py), size, size);
           }
-        }
+        });
+        bgCtx.globalAlpha = 1.0;
       }
 
-      // 3. Draw 3D Arching Flight Routes in Hyperspace
-      Object.values(state.ships).forEach((sh) => {
-        if (sh.state === ShipState.MOVING && sh.targetPlanetId) {
-          const src = state.planets[sh.planetId];
-          const tgt = state.planets[sh.targetPlanetId];
-          if (src && tgt) {
-            const dx = src.x - tgt.x;
-            const dy = src.y - tgt.y;
-            const dist = Math.sqrt(dx * dx + dy * dy);
-            
-            ctx.strokeStyle = sh.ownerId === playerId ? 'rgba(59, 130, 246, 0.25)' : 'rgba(239, 68, 68, 0.22)';
-            ctx.lineWidth = 2.0;
-            ctx.beginPath();
-            
-            const steps = 28;
-            const px = -(tgt.y - src.y) / dist;
-            const py = (tgt.x - src.x) / dist;
-            const curveIntensity = 30 * (dist / 300);
+      // Render pixelated background onto main high-res canvas (with crisp nearest-neighbor scale)
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(bgCanvas, 0, 0, canvas.width, canvas.height);
+      ctx.imageSmoothingEnabled = true; // reset for normal rendering of text, ship vectors, UI, and dynamic components
 
-            for (let i = 0; i <= steps; i++) {
-              const p = i / steps;
-              const lx = src.x + (tgt.x - src.x) * p;
-              const ly = src.y + (tgt.y - src.y) * p;
-              const disp = Math.sin(p * Math.PI) * curveIntensity;
-              const wx = lx + px * disp;
-              const wy = ly + py * disp;
-              const wz = 60 * Math.sin(Math.PI * p);
-
-              const proj = projectPoint(wx, wy, wz, camFocus, canvas.width, canvas.height);
-              if (i === 0) ctx.moveTo(proj.x, proj.y);
-              else ctx.lineTo(proj.x, proj.y);
-            }
-            ctx.stroke();
-            
-            const tOffset = (Date.now() * 0.001) % 1.0;
-            const lx_p = src.x + (tgt.x - src.x) * tOffset;
-            const ly_p = src.y + (tgt.y - src.y) * tOffset;
-            const disp_p = Math.sin(tOffset * Math.PI) * curveIntensity;
-            const wx_p = lx_p + px * disp_p;
-            const wy_p = ly_p + py * disp_p;
-            const wz_p = 60 * Math.sin(Math.PI * tOffset);
-            
-            const projPulse = projectPoint(wx_p, wy_p, wz_p, camFocus, canvas.width, canvas.height);
-            ctx.fillStyle = sh.ownerId === playerId ? '#60a5fa' : '#f87171';
-            ctx.beginPath();
-            ctx.arc(projPulse.x, projPulse.y, 2.5 * projPulse.scale, 0, Math.PI * 2);
-            ctx.fill();
-          }
-        }
-      });
-
-      // 4. (Orbit rings under the planets flat on the 3D plane removed as requested)
+      // --- 3D ENVIRONMENT GEOMETRIES ---
+      // 2.5 & 3. Fixed connection paths and orbital lines removed as requested to keep the battlefield clean
 
       // Map to cache actual projected screen locations of ships for laser beam synchronization
       const shipProjectedMap: Record<string, { x: number; y: number }> = {};
 
-      // 5. Draw 3D Planets (including layers: rings, oceans, continents, clouds, atmospheric glows)
-      Object.values(state.planets).forEach((pl) => {
-        const isHovered = hoveredPlanet?.id === pl.id;
+      // 1. Calculate world positions & 3D depths for all ships
+      interface ShipRenderInfo {
+        sh: Ship;
+        wx: number;
+        wy: number;
+        wz: number;
+        headingAngle: number;
+        shipColor: string;
+        planetCenter?: { x: number; y: number; z: number };
+        velo3D?: { x: number; y: number; z: number };
+      }
 
-        let planetColor = '#64748b';
-        if (pl.ownerId) {
-          const owner = state.players[pl.ownerId];
-          if (owner) planetColor = owner.factionId;
+      // Pre-group orbiting ships per planet for well-distributed 3D orbital plane assignments
+      const orbitingShipsMap: Record<string, Ship[]> = {};
+      Object.values(state.ships).forEach((sh) => {
+        if (sh.state !== ShipState.MOVING && sh.planetId && state.planets[sh.planetId]) {
+          if (!orbitingShipsMap[sh.planetId]) {
+            orbitingShipsMap[sh.planetId] = [];
+          }
+          orbitingShipsMap[sh.planetId].push(sh);
+        }
+      });
+
+      // Sort deterministically by ship ID
+      Object.keys(orbitingShipsMap).forEach((pId) => {
+        orbitingShipsMap[pId].sort((a, b) => a.id.localeCompare(b.id));
+      });
+
+      const shipInfoList: ShipRenderInfo[] = Object.values(state.ships).map((sh) => {
+        const owner = state.players[sh.ownerId];
+        let shipColor = owner?.factionId || '#ffffff';
+
+        if (sh.type === ShipType.SPY && sh.spyDisguisedAs) {
+          const fakeOwner = state.players[sh.spyDisguisedAs];
+          if (sh.ownerId !== playerId) {
+            shipColor = fakeOwner?.factionId || '#ffffff';
+          }
         }
 
+        let wx = sh.x;
+        let wy = sh.y;
+        let wz = 0;
+        let headingAngle = 0;
+        let planetCenter: { x: number; y: number; z: number } | undefined = undefined;
+        let velo3D: { x: number; y: number; z: number } | undefined = undefined;
+
+        if (sh.state === ShipState.MOVING && sh.targetPlanetId) {
+          const src = state.planets[sh.planetId];
+          const tgt = state.planets[sh.targetPlanetId];
+          if (tgt) {
+            let sx = sh.startX;
+            let sy = sh.startY;
+            let sz = sh.startZ;
+
+            if (sx === undefined || sy === undefined || sz === undefined) {
+              sx = sh.x;
+              sy = sh.y;
+              sz = sh.z || 0;
+            }
+
+            const params = getShipOrbitParams(sh, tgt);
+            const entryAngle = getOrbitEntryAngle(sx, sy, sz, tgt, params);
+            const entryPos = getOrbitPosFromPhase(tgt, params, entryAngle);
+
+            const dx = entryPos.x - sx;
+            const dy = entryPos.y - sy;
+            const dz = entryPos.z - sz;
+            const dist = Math.hypot(dx, dy, dz);
+
+            if (dist > 0) {
+              const dtFrame = Math.max(0, Math.min(0.1, (nowMs - (sh.lastUpdateMs || nowMs)) / 1000));
+              const p = Math.min(0.999, Math.max(0.0, sh.travelProgress + (sh.speed * dtFrame) / dist));
+
+              wx = sx + dx * p;
+              wy = sy + dy * p;
+              wz = sz + dz * p + Math.sin(Math.PI * p) * Math.min(30, dist * 0.1);
+
+              headingAngle = sh.headingAngle ?? Math.atan2(dy, dx);
+              velo3D = { x: dx, y: dy, z: dz };
+            } else {
+              wx = sh.x;
+              wy = sh.y;
+              wz = sh.z || 0;
+              headingAngle = sh.headingAngle || 0;
+            }
+          } else {
+            wx = sh.x;
+            wy = sh.y;
+            wz = sh.z || 0;
+            headingAngle = sh.headingAngle || 0;
+          }
+        } else {
+          const pl = state.planets[sh.planetId];
+          if (pl) {
+            planetCenter = { x: pl.x, y: pl.y, z: 0 };
+            const orb = computeShipOrbitPosition(sh, pl, nowMs);
+
+            // Check if enemy ships exist at this planet for combat pursuit disengagement
+            const enemyShipsAtPl = Object.values(state.ships).filter(
+              (other) => other.planetId === sh.planetId && other.ownerId !== sh.ownerId && other.state !== ShipState.MOVING
+            );
+
+            if (enemyShipsAtPl.length > 0 && SHIP_CONFIGS[sh.type].attack > 0) {
+              // Combat Pursuit Mode: disengage tight orbit to chase target enemy ship
+              const target = enemyShipsAtPl[0];
+              const targetOrb = computeShipOrbitPosition(target, pl, nowMs);
+
+              const dx = targetOrb.x - orb.x;
+              const dy = targetOrb.y - orb.y;
+              const dz = targetOrb.z - orb.z;
+
+              const chaseFactor = 0.35;
+              wx = orb.x + dx * chaseFactor;
+              wy = orb.y + dy * chaseFactor;
+              wz = orb.z + dz * chaseFactor;
+
+              headingAngle = Math.atan2(dy, dx);
+              velo3D = { x: dx, y: dy, z: dz };
+            } else {
+              // Peaceful Orbit
+              wx = orb.x;
+              wy = orb.y;
+              wz = orb.z;
+              velo3D = orb.velo3D;
+              headingAngle = orb.headingAngle;
+            }
+          }
+        }
+
+        return { sh, wx, wy, wz, headingAngle, shipColor, planetCenter, velo3D };
+      });
+
+      // Combine planets and ships into a single depth-sorted render queue
+      type RenderQueueItem =
+        | { kind: 'planet'; planet: Planet; wz: number }
+        | { kind: 'ship'; info: ShipRenderInfo; wz: number };
+
+      const renderQueue: RenderQueueItem[] = [];
+
+      Object.values(state.planets).forEach((pl) => {
+        renderQueue.push({ kind: 'planet', planet: pl, wz: 0 });
+      });
+
+      shipInfoList.forEach((info) => {
+        renderQueue.push({ kind: 'ship', info, wz: info.wz });
+      });
+
+      // Sort by 3D Z depth (lowest wz / furthest away first, highest wz / closest front last)
+      renderQueue.sort((a, b) => a.wz - b.wz);
+
+      // Render 3D Scene Geometry in Depth Order
+      renderQueue.forEach((item) => {
+        if (item.kind === 'planet') {
+          const pl = item.planet;
+          const isHovered = hoveredPlanet?.id === pl.id;
+          let planetColor = '#64748b';
+          if (pl.ownerId) {
+            const owner = state.players[pl.ownerId];
+            if (owner) planetColor = owner.factionId;
+          }
+          draw3DPlanetWithLayers(ctx, pl, camFocus, canvas.width, canvas.height, planetColor, isHovered);
+        } else {
+          const { sh, wx, wy, wz, headingAngle, shipColor, planetCenter, velo3D } = item.info;
+
+          // Ribbon trail for moving ships
+          if (sh.state === ShipState.MOVING) {
+            let trailList = smoothTrailMapRef.current[sh.id];
+            if (!trailList) {
+              trailList = [];
+              smoothTrailMapRef.current[sh.id] = trailList;
+            }
+
+            const lastPt = trailList[0];
+            if (!lastPt || Math.hypot(wx - lastPt.wx, wy - lastPt.wy) > 1.2) {
+              trailList.unshift({ wx, wy, wz, time: nowMs });
+            }
+
+            while (trailList.length > 0 && nowMs - trailList[trailList.length - 1].time > 450) {
+              trailList.pop();
+            }
+
+            if (trailList.length > 1) {
+              ctx.save();
+              for (let i = 0; i < trailList.length - 1; i++) {
+                const pt1 = trailList[i];
+                const pt2 = trailList[i + 1];
+
+                const proj1 = projectPoint(pt1.wx, pt1.wy, pt1.wz, camFocus, canvas.width, canvas.height);
+                const proj2 = projectPoint(pt2.wx, pt2.wy, pt2.wz, camFocus, canvas.width, canvas.height);
+
+                const lifeProgress = i / trailList.length;
+                const alpha = (1 - lifeProgress) * 0.75;
+                const lineWidth = Math.max(1.2, (14 - i * 0.7) * proj1.scale);
+
+                ctx.strokeStyle = shipColor;
+                ctx.globalAlpha = alpha;
+                ctx.lineWidth = lineWidth;
+                ctx.lineCap = 'round';
+                ctx.beginPath();
+                ctx.moveTo(proj1.x, proj1.y);
+                ctx.lineTo(proj2.x, proj2.y);
+                ctx.stroke();
+
+                ctx.strokeStyle = '#ffffff';
+                ctx.globalAlpha = alpha * 0.85;
+                ctx.lineWidth = Math.max(0.8, lineWidth * 0.35);
+                ctx.beginPath();
+                ctx.moveTo(proj1.x, proj1.y);
+                ctx.lineTo(proj2.x, proj2.y);
+                ctx.stroke();
+              }
+              ctx.restore();
+            }
+          } else {
+            delete smoothTrailMapRef.current[sh.id];
+          }
+
+          // Cache projected screen coords for laser & UI alignment
+          const projShip = projectPoint(wx, wy, wz, camFocus, canvas.width, canvas.height);
+          shipProjectedMap[sh.id] = { x: projShip.x, y: projShip.y };
+
+          // Draw the high-detail 3D ship
+          draw3DShip(ctx, sh.type, wx, wy, wz, headingAngle, shipColor, sh.state === ShipState.MOVING, camFocus, canvas.width, canvas.height, planetCenter, velo3D);
+
+          // Draw mini HP/shield bar for injured ships (always visible as long as not full health)
+          const isInjured = sh.hp < sh.maxHp || (sh.maxShield > 0 && sh.shield < sh.maxShield);
+          if (isInjured) {
+            const barW = Math.max(22, Math.min(36, 26 * projShip.scale));
+            const barH = 3.5;
+            const barX = projShip.x - barW / 2;
+            const barY = projShip.y - (18 * projShip.scale);
+
+            ctx.save();
+            // Black backdrop
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.85)';
+            ctx.fillRect(barX - 1, barY - 1, barW + 2, barH + 2);
+
+            // Shield bar (cyan/blue)
+            if (sh.maxShield > 0) {
+              const shieldPct = Math.max(0, Math.min(1.0, sh.shield / sh.maxShield));
+              if (shieldPct > 0) {
+                ctx.fillStyle = '#38bdf8';
+                ctx.fillRect(barX, barY - 2.5, barW * shieldPct, 2);
+              }
+            }
+
+            // Health bar (green/yellow/red)
+            const hpPct = Math.max(0, Math.min(1.0, sh.hp / sh.maxHp));
+            const hpColor = hpPct > 0.6 ? '#4ade80' : hpPct > 0.25 ? '#facc15' : '#f87171';
+            ctx.fillStyle = hpColor;
+            ctx.fillRect(barX, barY, barW * hpPct, barH);
+            ctx.restore();
+          }
+        }
+      });
+
+      // 2D Planet Status Panel & HUD Overlay
+      Object.values(state.planets).forEach((pl) => {
+        const isHovered = hoveredPlanet?.id === pl.id;
         const projPl = projectPoint(pl.x, pl.y, 0, camFocus, canvas.width, canvas.height);
         const cache = planetCache[pl.id];
         const radius = cache ? cache.style.radius : 24;
         const visualRadius = radius * projPl.scale;
 
-        // Capture progress rings
-        if (pl.captureProgress > 0 && pl.captureProgress < 100 && pl.capturingFactionId) {
-          const capColor = state.players[pl.capturingFactionId]?.factionId || '#ffffff';
-          const maxAng = (Math.PI * 2 * pl.captureProgress) / 100;
-          draw3DFlatCircle(
-            ctx,
-            pl.x,
-            pl.y,
-            radius + 7,
-            camFocus,
-            canvas.width,
-            canvas.height,
-            capColor,
-            3,
-            undefined,
-            -Math.PI / 2,
-            maxAng - Math.PI / 2
-          );
-        }
-
-        // Faction-colored high-tech orbital occupation rings
-        if (pl.ownerId && pl.captureProgress === 100 && pl.type !== PlanetType.HOME) {
-          const owner = state.players[pl.ownerId];
-          if (owner) {
-            const ringCol = hexToRgba(owner.factionId, 0.45);
-            const pulseSize = Math.sin(Date.now() * 0.003) * 1.2;
-            
-            // The first ring: thin, dashed, and pulsing
-            draw3DFlatCircle(
-              ctx,
-              pl.x,
-              pl.y,
-              radius + 6 + pulseSize,
-              camFocus,
-              canvas.width,
-              canvas.height,
-              ringCol,
-              1.0,
-              [4, 4]
-            );
-            
-            // The second ring: solid, very faint outer envelope
-            draw3DFlatCircle(
-              ctx,
-              pl.x,
-              pl.y,
-              radius + 7.5,
-              camFocus,
-              canvas.width,
-              canvas.height,
-              hexToRgba(owner.factionId, 0.15),
-              0.5
-            );
-            
-            // Draw little rotating technical telemetry nodes on the orbit line
-            const angleTick = (Date.now() * 0.0006) % (Math.PI * 2);
-            for (let i = 0; i < 4; i++) {
-              const tickAngle = angleTick + (i * Math.PI / 2);
-              const tx = pl.x + Math.cos(tickAngle) * (radius + 6 + pulseSize);
-              const ty = pl.y + Math.sin(tickAngle) * (radius + 6 + pulseSize);
-              const projTick = projectPoint(tx, ty, 0, camFocus, canvas.width, canvas.height);
-              
-              ctx.fillStyle = owner.factionId;
-              ctx.fillRect(Math.floor(projTick.x - 1.5), Math.floor(projTick.y - 1.5), 3, 3);
-            }
+        const uRadius = visualRadius * 1.50;
+        const barPct = Math.max(0, Math.min(1.0, pl.hp / (pl.maxHp || 100)));
+        let barColor = '#fde047';
+        if (pl.ownerId) {
+          if (pl.ownerId === playerId) {
+            barColor = '#4ade80';
+          } else {
+            barColor = '#f87171';
           }
         }
 
-        // Play card target indicator
-        if (selectedCardId && isHovered) {
-          draw3DFlatCircle(ctx, pl.x, pl.y, radius + 11, camFocus, canvas.width, canvas.height, '#ef4444', 1.5, [2, 3]);
-        }
+        const panelBottomY = Math.round(projPl.y - uRadius - 2);
+        const resY = panelBottomY - 6;
+        const barY = resY - 14;
+        const nameY = barY + (currentDebugSettings.nameOffsetY ?? -8);
+        const topIconY = nameY + (currentDebugSettings.iconOffsetY ?? -13);
 
-        // RENDER the 3D Procedural Multi-layered Planet Sphere
-        draw3DPlanetWithLayers(ctx, pl, camFocus, canvas.width, canvas.height, planetColor, isHovered);
+        ctx.save();
+        ctx.translate(projPl.x, topIconY);
+        ctx.strokeStyle = '#000000';
+        ctx.lineWidth = 3;
 
-        // Name & Label details in high-readability tactical container cards
-        let tag = '';
-        let tagColor = '#94a3b8';
         if (pl.type === PlanetType.HOME) {
-          tag = ' [母星]';
-          tagColor = '#60a5fa';
+          ctx.fillStyle = '#000000';
+          ctx.fillRect(-10, -9, 20, 18);
+
+          ctx.fillStyle = '#ffffff';
+          ctx.fillRect(-8, -2, 16, 9);
+          ctx.fillRect(-3, -7, 6, 5);
+          ctx.fillRect(-2, -9, 4, 2);
+          ctx.fillRect(-8, -5, 4, 3);
+          ctx.fillRect(-7, -7, 2, 2);
+          ctx.fillRect(4, -5, 4, 3);
+          ctx.fillRect(5, -7, 2, 2);
+          ctx.fillStyle = '#000000';
+          ctx.fillRect(-2, 2, 4, 5);
         } else if (pl.type === PlanetType.RESOURCE) {
-          tag = pl.subType === PlanetSubType.MINERAL ? ' [晶矿]' : ' [科技]';
-          tagColor = '#fbbf24';
+          if (pl.subType === PlanetSubType.TECH) {
+            ctx.fillStyle = '#000000';
+            ctx.beginPath();
+            for (let a = 0; a < 8; a++) {
+              const r = a % 2 === 0 ? 10.5 : 4.0;
+              const angle = (a * Math.PI) / 4 - Math.PI / 2;
+              ctx.lineTo(Math.cos(angle) * r, Math.sin(angle) * r);
+            }
+            ctx.closePath();
+            ctx.fill();
+
+            ctx.fillStyle = '#ffffff';
+            ctx.beginPath();
+            for (let a = 0; a < 8; a++) {
+              const r = a % 2 === 0 ? 9.0 : 3.0;
+              const angle = (a * Math.PI) / 4 - Math.PI / 2;
+              ctx.lineTo(Math.cos(angle) * r, Math.sin(angle) * r);
+            }
+            ctx.closePath();
+            ctx.fill();
+
+            ctx.fillStyle = '#000000';
+            ctx.beginPath();
+            ctx.moveTo(0, -2.5); ctx.lineTo(2.5, 0); ctx.lineTo(0, 2.5); ctx.lineTo(-2.5, 0);
+            ctx.closePath();
+            ctx.fill();
+          } else {
+            ctx.fillStyle = '#000000';
+            ctx.beginPath();
+            ctx.moveTo(0, -10.5); ctx.lineTo(9.5, 0); ctx.lineTo(0, 10.5); ctx.lineTo(-9.5, 0);
+            ctx.closePath();
+            ctx.fill();
+
+            ctx.fillStyle = '#ffffff';
+            ctx.beginPath();
+            ctx.moveTo(0, -9); ctx.lineTo(8, 0); ctx.lineTo(0, 9); ctx.lineTo(-8, 0);
+            ctx.closePath();
+            ctx.fill();
+
+            ctx.fillStyle = '#000000';
+            ctx.beginPath();
+            ctx.moveTo(0, -4); ctx.lineTo(3.5, 0.5); ctx.lineTo(0, 5); ctx.lineTo(-3.5, 0.5);
+            ctx.closePath();
+            ctx.fill();
+          }
         } else if (pl.type === PlanetType.SPECIAL) {
-          tag = pl.subType === PlanetSubType.HEAL ? ' [医疗]' : ' [重磁]';
-          tagColor = '#34d399';
+          if (pl.subType === PlanetSubType.HEAL) {
+            ctx.fillStyle = '#000000';
+            ctx.fillRect(-9, -3.5, 18, 7);
+            ctx.fillRect(-3.5, -9, 7, 18);
+
+            ctx.fillStyle = '#ffffff';
+            ctx.fillRect(-8, -2.5, 16, 5);
+            ctx.fillRect(-2.5, -8, 5, 16);
+          } else {
+            ctx.fillStyle = '#000000';
+            ctx.beginPath();
+            ctx.moveTo(-8, -8); ctx.lineTo(8, -8); ctx.lineTo(8, 0); ctx.lineTo(0, 9.5); ctx.lineTo(-8, 0);
+            ctx.closePath();
+            ctx.fill();
+
+            ctx.fillStyle = '#ffffff';
+            ctx.beginPath();
+            ctx.moveTo(-7, -7); ctx.lineTo(7, -7); ctx.lineTo(7, 0); ctx.lineTo(0, 8); ctx.lineTo(-7, 0);
+            ctx.closePath();
+            ctx.fill();
+
+            ctx.fillStyle = '#000000';
+            ctx.fillRect(-4, -1, 8, 2);
+            ctx.fillRect(-1, -4, 2, 8);
+          }
         } else {
-          tag = ' [前哨]';
-          tagColor = '#94a3b8';
+          ctx.fillStyle = '#000000';
+          ctx.beginPath();
+          ctx.arc(0, 0, 9, 0, Math.PI * 2);
+          ctx.fill();
+
+          ctx.fillStyle = '#ffffff';
+          ctx.beginPath();
+          ctx.arc(0, 0, 7.5, 0, Math.PI * 2);
+          ctx.fill();
+
+          ctx.fillStyle = '#000000';
+          ctx.beginPath();
+          ctx.arc(0, 0, 4.5, 0, Math.PI * 2);
+          ctx.fill();
+
+          ctx.fillStyle = '#ffffff';
+          ctx.beginPath();
+          ctx.arc(0, 0, 2.0, 0, Math.PI * 2);
+          ctx.fill();
         }
-        
-        ctx.font = 'bold 11px monospace';
-        const displayName = pl.name;
-        const textWidthName = ctx.measureText(displayName).width;
-        ctx.font = 'bold 9px monospace';
-        const textWidthTag = ctx.measureText(tag).width;
-        const totalWidth = textWidthName + textWidthTag + 8;
-        
-        // Draw a neat dark glassmorphic label badge for maximum contrast
-        ctx.fillStyle = 'rgba(8, 12, 28, 0.76)';
-        ctx.strokeStyle = 'rgba(255, 255, 255, 0.10)';
-        ctx.lineWidth = 1;
-        
-        const pillX = projPl.x - totalWidth / 2;
-        const pillY = projPl.y + visualRadius + 7;
-        const pillW = totalWidth;
-        const pillH = 26;
-        
-        ctx.beginPath();
-        ctx.roundRect(pillX, pillY, pillW, pillH, 4);
-        ctx.fill();
-        ctx.stroke();
-        
-        // Write the name
-        ctx.textAlign = 'left';
+        ctx.restore();
+
+        // Planet Name
+        ctx.save();
+        ctx.font = 'bold 12px -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'alphabetic';
+        ctx.strokeStyle = '#000000';
+        ctx.lineWidth = 3;
+        ctx.strokeText(pl.name, projPl.x, nameY);
         ctx.fillStyle = '#ffffff';
-        ctx.font = 'bold 11px monospace';
-        ctx.fillText(displayName, pillX + 4, pillY + 11);
-        
-        // Write the category tag
-        ctx.fillStyle = tagColor;
-        ctx.font = 'bold 9px monospace';
-        ctx.fillText(tag, pillX + 4 + textWidthName, pillY + 11);
-        
-        // Write sub-details on second row
-        ctx.font = '9px sans-serif';
-        if (pl.type === PlanetType.HOME) {
-          ctx.fillStyle = pl.hp > 30 ? '#34d399' : '#f87171';
-          ctx.fillText(`生命: ${Math.floor(pl.hp)}%`, pillX + 4, pillY + 22);
-        } else if (pl.type === PlanetType.RESOURCE) {
-          ctx.fillStyle = '#fbbf24';
-          ctx.fillText(pl.subType === PlanetSubType.MINERAL ? '矿物资源 💎' : '科技结晶 🧬', pillX + 4, pillY + 22);
-        } else if (pl.type === PlanetType.SPECIAL) {
-          ctx.fillStyle = pl.subType === PlanetSubType.HEAL ? '#34d399' : '#38bdf8';
-          ctx.fillText(pl.subType === PlanetSubType.HEAL ? '医疗恢复 🩹' : '强磁重盾 🛡️', pillX + 4, pillY + 22);
-        } else {
-          ctx.fillStyle = '#94a3b8';
-          ctx.fillText(pl.ownerId ? '帝国前哨 🚩' : '废弃据点 🪐', pillX + 4, pillY + 22);
+        ctx.fillText(pl.name, projPl.x, nameY);
+        ctx.restore();
+
+        // Health Bar
+        const barW = 80;
+        const barH = 7;
+        const barX = Math.round(projPl.x - barW / 2);
+
+        ctx.fillStyle = '#000000';
+        ctx.fillRect(barX - 1, barY - 1, barW + 2, barH + 2);
+
+        const numSegments = 5;
+        const gap = 2;
+        const segW = (barW - (numSegments - 1) * gap) / numSegments;
+
+        for (let i = 0; i < numSegments; i++) {
+          const segX = Math.round(barX + i * (segW + gap));
+          const segThreshold = (i + 1) / numSegments;
+          const isFilled = barPct >= segThreshold - 0.08;
+
+          if (isFilled) {
+            ctx.fillStyle = barColor;
+          } else {
+            ctx.fillStyle = '#1e293b';
+          }
+          ctx.fillRect(segX, barY, Math.round(segW), barH);
         }
 
-        // Spies status
+        // Resources
+        const owner = pl.ownerId ? state.players[pl.ownerId] : null;
+        const minVal = owner ? Math.floor(owner.minerals) : 0;
+        const techVal = owner ? Math.floor(owner.techPoints) : 0;
+
+        ctx.save();
+        ctx.textBaseline = 'middle';
+        ctx.font = 'bold 12px monospace, sans-serif';
+        ctx.textAlign = 'left';
+
+        const diamondCenterX = projPl.x - 34;
+        ctx.fillStyle = '#000000';
+        ctx.beginPath();
+        ctx.moveTo(diamondCenterX, resY - 6.5);
+        ctx.lineTo(diamondCenterX + 6.5, resY);
+        ctx.lineTo(diamondCenterX, resY + 6.5);
+        ctx.lineTo(diamondCenterX - 6.5, resY);
+        ctx.closePath();
+        ctx.fill();
+
+        ctx.fillStyle = '#00f0ff';
+        ctx.beginPath();
+        ctx.moveTo(diamondCenterX, resY - 5);
+        ctx.lineTo(diamondCenterX + 5, resY);
+        ctx.lineTo(diamondCenterX, resY + 5);
+        ctx.lineTo(diamondCenterX - 5, resY);
+        ctx.closePath();
+        ctx.fill();
+
+        ctx.fillStyle = '#000000';
+        ctx.beginPath();
+        ctx.moveTo(diamondCenterX, resY - 2);
+        ctx.lineTo(diamondCenterX + 2, resY);
+        ctx.lineTo(diamondCenterX, resY + 2);
+        ctx.lineTo(diamondCenterX - 2, resY);
+        ctx.closePath();
+        ctx.fill();
+
+        const minTextX = diamondCenterX + 9;
+        ctx.strokeStyle = '#000000';
+        ctx.lineWidth = 3;
+        ctx.strokeText(`${minVal}`, minTextX, resY);
+        ctx.fillStyle = '#00f0ff';
+        ctx.fillText(`${minVal}`, minTextX, resY);
+
+        const starCenterX = projPl.x + 8;
+        ctx.fillStyle = '#000000';
+        ctx.beginPath();
+        for (let a = 0; a < 8; a++) {
+          const r = a % 2 === 0 ? 7.0 : 2.8;
+          const angle = (a * Math.PI) / 4 - Math.PI / 2;
+          ctx.lineTo(starCenterX + Math.cos(angle) * r, resY + Math.sin(angle) * r);
+        }
+        ctx.closePath();
+        ctx.fill();
+
+        ctx.fillStyle = '#e066ff';
+        ctx.beginPath();
+        for (let a = 0; a < 8; a++) {
+          const r = a % 2 === 0 ? 5.2 : 2.0;
+          const angle = (a * Math.PI) / 4 - Math.PI / 2;
+          ctx.lineTo(starCenterX + Math.cos(angle) * r, resY + Math.sin(angle) * r);
+        }
+        ctx.closePath();
+        ctx.fill();
+
+        ctx.fillStyle = '#000000';
+        ctx.fillRect(starCenterX - 1, resY - 1, 2, 2);
+
+        const techTextX = starCenterX + 9;
+        ctx.strokeStyle = '#000000';
+        ctx.lineWidth = 3;
+        ctx.strokeText(`${techVal}`, techTextX, resY);
+        ctx.fillStyle = '#e066ff';
+        ctx.fillText(`${techVal}`, techTextX, resY);
+
+        ctx.restore();
+
+        // Capture ring HUD
+        if (pl.captureProgress > 0) {
+          let capColor = '#ffffff';
+          if (pl.capturingFactionId) {
+            capColor = state.players[pl.capturingFactionId]?.factionId || '#ffffff';
+          } else if (pl.ownerId) {
+            capColor = state.players[pl.ownerId]?.factionId || '#ffffff';
+          }
+
+          ctx.strokeStyle = 'rgba(255, 255, 255, 0.12)';
+          ctx.lineWidth = 1.25;
+          ctx.beginPath();
+          ctx.arc(projPl.x, projPl.y, uRadius, 0, Math.PI * 2);
+          ctx.stroke();
+
+          ctx.strokeStyle = capColor;
+          ctx.lineWidth = 1.25;
+          ctx.lineCap = 'round';
+          ctx.beginPath();
+          const startAngle = -Math.PI / 2;
+          const endAngle = startAngle + (Math.PI * 2 * pl.captureProgress) / 100;
+          ctx.arc(projPl.x, projPl.y, uRadius, startAngle, endAngle);
+          ctx.stroke();
+          ctx.lineCap = 'butt';
+
+          if (pl.captureProgress > 0 && pl.captureProgress < 100) {
+            ctx.font = 'bold 9px monospace';
+            ctx.fillStyle = capColor;
+            ctx.textAlign = 'center';
+            ctx.strokeStyle = '#000000';
+            ctx.lineWidth = 2.0;
+            ctx.strokeText(`${Math.floor(pl.captureProgress)}%`, projPl.x, projPl.y + uRadius + 12);
+            ctx.fillText(`${Math.floor(pl.captureProgress)}%`, projPl.x, projPl.y + uRadius + 12);
+          }
+        }
+
         if (pl.debuffs.length > 0) {
           const mySpyPresent = pl.debuffs.some((d) => d.ownerId === playerId);
           if (mySpyPresent) {
             ctx.fillStyle = '#c084fc';
-            ctx.font = 'bold 8px monospace';
-            ctx.fillText('🕵️ 我方间谍潜入', projPl.x, projPl.y - 38);
+            ctx.font = 'bold 10px monospace';
+            ctx.fillText('🕵️', projPl.x - barW / 2 - 10, barY + barH);
           }
         }
       });
@@ -1704,120 +2347,53 @@ export default function SpaceBattlefield({
         ctx.fillText('释放以派遣舰队', dragCurrentPos.x, dragCurrentPos.y - 12);
       }
 
-      // 6. Draw 3D Spacecrafts
-      Object.values(state.ships).forEach((sh) => {
-        const owner = state.players[sh.ownerId];
-        let shipColor = owner?.factionId || '#ffffff';
-
-        if (sh.type === ShipType.SPY && sh.spyDisguisedAs) {
-          const fakeOwner = state.players[sh.spyDisguisedAs];
-          if (sh.ownerId !== playerId) {
-            shipColor = fakeOwner?.factionId || '#ffffff';
-          }
-        }
-
-        let wx = sh.x;
-        let wy = sh.y;
-        let wz = 0;
-        let headingAngle = 0;
-
-        if (sh.state === ShipState.MOVING && sh.targetPlanetId) {
-          const src = state.planets[sh.planetId];
-          const tgt = state.planets[sh.targetPlanetId];
-          if (src && tgt) {
-            const p = sh.travelProgress;
-            const dx = src.x - tgt.x;
-            const dy = src.y - tgt.y;
-            const dist = Math.sqrt(dx * dx + dy * dy);
-            
-            // Linear interpolation base
-            const lx = src.x + (tgt.x - src.x) * p;
-            const ly = src.y + (tgt.y - src.y) * p;
-            
-            // Perpendicular curved displacement to follow connection lanes
-            const px = -(tgt.y - src.y) / dist;
-            const py = (tgt.x - src.x) / dist;
-            const curveIntensity = 30 * (dist / 300);
-            const disp = Math.sin(p * Math.PI) * curveIntensity;
-            
-            wx = lx + px * disp;
-            wy = ly + py * disp;
-            wz = 60 * Math.sin(Math.PI * p); // arch peak on Z-axis
-            
-            // Numerical tangent calculation for accurate heading direction along the curve
-            const nextP = Math.min(1.0, p + 0.01);
-            const nlx = src.x + (tgt.x - src.x) * nextP;
-            const nly = src.y + (tgt.y - src.y) * nextP;
-            const ndisp = Math.sin(nextP * Math.PI) * curveIntensity;
-            const nwx = nlx + px * ndisp;
-            const nwy = nly + py * ndisp;
-            headingAngle = Math.atan2(nwy - wy, nwx - wx);
-          }
-        } else {
-          // Stable orbit calculations
-          const pl = state.planets[sh.planetId];
-          if (pl) {
-            const angle = Math.atan2(sh.y - pl.y, sh.x - pl.x);
-            // Dynamic orbit radius scaling relative to the planet's visual radius to prevent clipping
-            const plCache = planetCache[pl.id];
-            const pRadius = plCache ? plCache.style.radius : (pl.type === PlanetType.HOME ? 50 : 24);
-            const orbitRad = pRadius + (sh.type === ShipType.SCOUT ? 12 : sh.type === ShipType.FRIGATE ? 24 : sh.type === ShipType.DREADNOUGHT ? 36 : 10);
-
-            const rx = Math.cos(angle) * orbitRad;
-            const ry = Math.sin(angle) * orbitRad;
-
-            const tiltX = 0.55;
-            const tiltZ = 0.4;
-            const y1 = ry * Math.cos(tiltX);
-            const z1 = ry * Math.sin(tiltX);
-
-            const x2 = rx * Math.cos(tiltZ) - y1 * Math.sin(tiltZ);
-            const y2 = rx * Math.sin(tiltZ) + y1 * Math.cos(tiltZ);
-            const z2 = z1;
-
-            const zHeight =
-              sh.type === ShipType.FRIGATE ? 9 : sh.type === ShipType.DREADNOUGHT ? -5 : sh.type === ShipType.SPY ? -9 : 3;
-
-            wx = pl.x + x2;
-            wy = pl.y + y2;
-            wz = z2 + zHeight;
-
-            headingAngle = angle + Math.PI / 2;
-          }
-        }
-
-        // Draw and cache screen coordinates of ship
+      // Visual HP and shield overlay bars for 3D ships
+      shipInfoList.forEach(({ sh, wx, wy, wz }) => {
         const projShip = projectPoint(wx, wy, wz, camFocus, canvas.width, canvas.height);
-        shipProjectedMap[sh.id] = { x: projShip.x, y: projShip.y };
 
-        draw3DShip(ctx, sh.type, wx, wy, wz, headingAngle, shipColor, sh.state === ShipState.MOVING, camFocus, canvas.width, canvas.height);
-
-        // Visual HP and shield overlay bars
         if (sh.hp < sh.maxHp || sh.type === ShipType.DREADNOUGHT) {
           const hpPct = sh.hp / sh.maxHp;
-          ctx.fillStyle = 'rgba(0,0,0,0.6)';
-          ctx.fillRect(projShip.x - 10, projShip.y - 13, 20, 3);
-          ctx.fillStyle = hpPct > 0.4 ? '#10b981' : '#f43f5e';
-          ctx.fillRect(projShip.x - 10, projShip.y - 13, 20 * hpPct, 3);
+          const barW = 28;
+          const barH = 4;
+          const barY = projShip.y - 24;
+
+          ctx.fillStyle = 'rgba(0,0,0,0.75)';
+          ctx.fillRect(projShip.x - barW / 2 - 1, barY - 1, barW + 2, barH + 2);
+
+          let shipBarColor = '#fde047'; // Neutral
+          if (sh.ownerId) {
+            if (sh.ownerId === playerId) {
+              shipBarColor = '#4ade80'; // Player Green
+            } else {
+              shipBarColor = '#f87171'; // Enemy Red
+            }
+          }
+          ctx.fillStyle = shipBarColor;
+          ctx.fillRect(projShip.x - barW / 2, barY, barW * hpPct, barH);
         }
 
         if (sh.shield > 0) {
-          ctx.strokeStyle = '#38bdf8';
-          ctx.lineWidth = 1;
+          ctx.strokeStyle = 'rgba(56, 189, 248, 0.55)';
+          ctx.lineWidth = 1.5;
           ctx.beginPath();
-          ctx.arc(projShip.x, projShip.y, 11 * projShip.scale, 0, Math.PI * 2);
+          ctx.arc(projShip.x, projShip.y, 16 * projShip.scale, 0, Math.PI * 2);
+          ctx.stroke();
+
+          ctx.strokeStyle = 'rgba(14, 165, 233, 0.22)';
+          ctx.lineWidth = 3.0;
+          ctx.beginPath();
+          ctx.arc(projShip.x, projShip.y, 19 * projShip.scale, 0, Math.PI * 2);
           ctx.stroke();
         }
       });
 
-      // 7. Draw Real-time Combat lasers shot synchronized with projected coordinates
+      // 7. Scatter Bullet Projectiles & Combat Lasers
       Object.keys(state.planets).forEach((planetId) => {
-        const pl = state.planets[planetId];
-        if (pl.isContested) {
-          const shipsAtPl = Object.values(state.ships).filter(
-            (sh) => sh.planetId === planetId && sh.state !== ShipState.MOVING
-          );
+        const shipsAtPl = Object.values(state.ships).filter(
+          (sh) => sh.planetId === planetId && sh.state !== ShipState.MOVING
+        );
 
+        if (shipsAtPl.length > 1) {
           shipsAtPl.forEach((attacker) => {
             if (SHIP_CONFIGS[attacker.type].attack > 0 && Math.random() < 0.28) {
               const targets = shipsAtPl.filter((t) => t.ownerId !== attacker.ownerId);
@@ -1828,28 +2404,69 @@ export default function SpaceBattlefield({
                 const sTarget = shipProjectedMap[target.id];
 
                 if (sAttacker && sTarget) {
-                  ctx.strokeStyle = attacker.ownerId === playerId ? '#10b981' : '#ef4444';
-                  ctx.lineWidth = attacker.type === ShipType.DREADNOUGHT ? 2 : 1;
+                  // Fire bullet with slight angular scatter
+                  const dx = sTarget.x - sAttacker.x;
+                  const dy = sTarget.y - sAttacker.y;
+                  const baseAngle = Math.atan2(dy, dx);
+                  const scatter = (Math.random() - 0.5) * 0.16; // light scatter ±4.6°
+                  const fireAngle = baseAngle + scatter;
+                  const bSpeed = 10 + Math.random() * 5;
+
+                  bulletsRef.current.push({
+                    x: sAttacker.x,
+                    y: sAttacker.y,
+                    z: 0,
+                    vx: Math.cos(fireAngle) * bSpeed,
+                    vy: Math.sin(fireAngle) * bSpeed,
+                    vz: (Math.random() - 0.5) * 1.5,
+                    color: attacker.ownerId === playerId ? '#38bdf8' : '#f87171',
+                    life: 18,
+                  });
+
+                  // Dual glowing tracer laser beam
+                  ctx.strokeStyle = attacker.ownerId === playerId ? 'rgba(56, 189, 248, 0.45)' : 'rgba(248, 113, 113, 0.45)';
+                  ctx.lineWidth = attacker.type === ShipType.DREADNOUGHT ? 2.5 : 1.5;
                   ctx.beginPath();
                   ctx.moveTo(sAttacker.x, sAttacker.y);
                   ctx.lineTo(sTarget.x, sTarget.y);
                   ctx.stroke();
-
-                  // Exploding sparks
-                  sparksRef.current.push({
-                    x: sTarget.x,
-                    y: sTarget.y,
-                    vx: (Math.random() - 0.5) * 4.5,
-                    vy: (Math.random() - 0.5) * 4.5,
-                    color: attacker.ownerId === playerId ? '#34d399' : '#f87171',
-                    life: 16,
-                  });
                 }
               }
             }
           });
         }
       });
+
+      // Update & Draw Bullets
+      for (let i = bulletsRef.current.length - 1; i >= 0; i--) {
+        const b = bulletsRef.current[i];
+        b.x += b.vx;
+        b.y += b.vy;
+        b.life--;
+
+        ctx.save();
+        ctx.fillStyle = b.color;
+        ctx.shadowColor = b.color;
+        ctx.shadowBlur = 6;
+        ctx.fillRect(b.x - 1.5, b.y - 1.5, 3, 3);
+
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(b.x - 0.5, b.y - 0.5, 1, 1);
+        ctx.restore();
+
+        if (b.life <= 0) {
+          // Exploding spark impact
+          sparksRef.current.push({
+            x: b.x,
+            y: b.y,
+            vx: (Math.random() - 0.5) * 4.5,
+            vy: (Math.random() - 0.5) * 4.5,
+            color: b.color,
+            life: 14,
+          });
+          bulletsRef.current.splice(i, 1);
+        }
+      }
 
       // 8. Update & Draw Sparkling combat particles
       const sparks = sparksRef.current;
@@ -2013,6 +2630,328 @@ export default function SpaceBattlefield({
               <span className="font-mono text-purple-400 font-bold">间谍船 x{idleSpiesCount}</span>
             </button>
           </div>
+        </div>
+      )}
+
+      {/* --- Top-Right HUD Controls: Camera Height Indicator & F3 Panel Button --- */}
+      <div className="absolute top-4 right-4 z-30 flex items-center gap-2 pointer-events-auto shadow-2xl">
+        {/* Real-Time Camera Height Badge */}
+        <div className="px-3 py-2 bg-slate-950/95 border border-cyan-500/60 text-cyan-300 font-mono text-xs rounded-xl flex items-center gap-3 backdrop-blur-xl shadow-cyan-950/50">
+          <div className="flex items-center gap-1.5 text-cyan-400">
+            <Camera className="w-4 h-4 text-cyan-400 shrink-0 animate-pulse" />
+            <span className="text-slate-300 font-sans text-xs font-extrabold tracking-wide">相机高度</span>
+          </div>
+
+          <div className="flex items-baseline gap-1 font-mono bg-cyan-950/60 px-2.5 py-0.5 rounded-lg border border-cyan-800/60">
+            <span className="font-extrabold text-amber-300 text-base">
+              {Math.round((debugSettings.cameraD || 1564) / zoom)}
+            </span>
+            <span className="text-[10px] text-slate-400 font-normal">px</span>
+          </div>
+
+          <div className="flex items-center gap-1">
+            <button
+              onClick={() => setDebugSettings((p) => ({ ...p, cameraD: Math.max(300, (p.cameraD || 1564) - 50) }))}
+              className="px-1.5 py-0.5 bg-slate-800 hover:bg-slate-700 border border-slate-600 rounded text-[10px] font-bold text-slate-200 cursor-pointer transition-all active:scale-95"
+              title="降低相机高度 -50"
+            >
+              -50
+            </button>
+            <button
+              onClick={() => setDebugSettings((p) => ({ ...p, cameraD: Math.min(2500, (p.cameraD || 1564) + 50) }))}
+              className="px-1.5 py-0.5 bg-slate-800 hover:bg-slate-700 border border-slate-600 rounded text-[10px] font-bold text-slate-200 cursor-pointer transition-all active:scale-95"
+              title="升高相机高度 +50"
+            >
+              +50
+            </button>
+            <button
+              onClick={() => {
+                setZoom(1.0);
+                setDebugSettings((p) => ({ ...p, cameraD: 1564, pitch: 0, yaw: 0 }));
+              }}
+              className="ml-1 px-2 py-0.5 bg-cyan-950/90 hover:bg-cyan-900 border border-cyan-500/50 text-cyan-300 text-[10px] rounded flex items-center gap-1 cursor-pointer transition-all active:scale-95 shadow-sm"
+              title="重置相机高度至基准 1564px"
+            >
+              <RotateCcw className="w-3 h-3 text-cyan-400" />
+              <span>1564 重置</span>
+            </button>
+          </div>
+        </div>
+
+        {/* F3 Debug Panel Toggle Button */}
+        <button
+          onClick={() => setDebugSettings((prev) => ({ ...prev, f3Open: !prev.f3Open }))}
+          className="px-3 py-2 bg-slate-950/95 hover:bg-slate-900 border border-cyan-500/60 text-cyan-300 font-mono text-xs rounded-xl shadow-2xl flex items-center gap-1.5 cursor-pointer backdrop-blur-xl transition-all active:scale-95"
+          title="按 F3 或点击展开高级 3D 调试面板"
+        >
+          <Sliders className="w-4 h-4 text-cyan-400 shrink-0" />
+          <span>F3 面板</span>
+        </button>
+      </div>
+
+      {/* --- F3 Debug Overlay Window --- */}
+      {debugSettings.f3Open && (
+        <div className="absolute top-16 right-4 z-40 w-84 max-h-[85vh] bg-slate-950/95 border border-cyan-500/50 shadow-2xl rounded-xl p-4 text-xs font-mono text-slate-200 backdrop-blur-xl overflow-y-auto space-y-4 animate-in fade-in zoom-in-95">
+          {/* Header */}
+          <div className="flex items-center justify-between border-b border-slate-800 pb-2.5">
+            <div className="flex items-center gap-2">
+              <Sliders className="w-4 h-4 text-cyan-400" />
+              <span className="font-bold text-cyan-300 text-sm">F3 渲染与镜头 Debug</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="px-2 py-0.5 bg-emerald-950/80 border border-emerald-500/40 text-emerald-400 font-bold rounded text-[10px]">
+                {fps} FPS
+              </span>
+              <button
+                onClick={() => setDebugSettings((prev) => ({ ...prev, f3Open: false }))}
+                className="p-1 hover:bg-slate-800 rounded text-slate-400 hover:text-slate-100 transition-colors cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+          </div>
+
+          {/* Section 1: Light Direction */}
+          <div className="space-y-2 bg-slate-900/60 p-2.5 rounded-lg border border-slate-800">
+            <div className="flex items-center justify-between text-amber-300 font-bold">
+              <span className="flex items-center gap-1.5">
+                <Sun className="w-3.5 h-3.5 text-amber-400" /> 3D Toon 光照方向 (Light Vector)
+              </span>
+            </div>
+
+            <div className="space-y-1.5 text-[11px]">
+              <div>
+                <div className="flex justify-between text-slate-400 mb-0.5">
+                  <span>Light X (左右):</span>
+                  <span className="text-amber-300">{debugSettings.lightX.toFixed(2)}</span>
+                </div>
+                <input
+                  type="range"
+                  min="-1.0"
+                  max="1.0"
+                  step="0.02"
+                  value={debugSettings.lightX}
+                  onChange={(e) => setDebugSettings((p) => ({ ...p, lightX: parseFloat(e.target.value) }))}
+                  className="w-full accent-amber-400 cursor-pointer"
+                />
+              </div>
+
+              <div>
+                <div className="flex justify-between text-slate-400 mb-0.5">
+                  <span>Light Y (上下):</span>
+                  <span className="text-amber-300">{debugSettings.lightY.toFixed(2)}</span>
+                </div>
+                <input
+                  type="range"
+                  min="-1.0"
+                  max="1.0"
+                  step="0.02"
+                  value={debugSettings.lightY}
+                  onChange={(e) => setDebugSettings((p) => ({ ...p, lightY: parseFloat(e.target.value) }))}
+                  className="w-full accent-amber-400 cursor-pointer"
+                />
+              </div>
+
+              <div>
+                <div className="flex justify-between text-slate-400 mb-0.5">
+                  <span>Light Z (前后高度):</span>
+                  <span className="text-amber-300">{debugSettings.lightZ.toFixed(2)}</span>
+                </div>
+                <input
+                  type="range"
+                  min="0.1"
+                  max="1.5"
+                  step="0.02"
+                  value={debugSettings.lightZ}
+                  onChange={(e) => setDebugSettings((p) => ({ ...p, lightZ: parseFloat(e.target.value) }))}
+                  className="w-full accent-amber-400 cursor-pointer"
+                />
+              </div>
+            </div>
+
+            {/* Light Presets */}
+            <div className="grid grid-cols-2 gap-1 pt-1">
+              <button
+                onClick={() => setDebugSettings((p) => ({ ...p, lightX: -0.354, lightY: -0.354, lightZ: 0.866 }))}
+                className="px-2 py-1 bg-slate-800 hover:bg-amber-950/60 border border-slate-700 hover:border-amber-500/50 text-[10px] rounded text-slate-200 transition-all cursor-pointer"
+              >
+                ↖️ 左上 (默认)
+              </button>
+              <button
+                onClick={() => setDebugSettings((p) => ({ ...p, lightX: 0.354, lightY: -0.354, lightZ: 0.866 }))}
+                className="px-2 py-1 bg-slate-800 hover:bg-amber-950/60 border border-slate-700 hover:border-amber-500/50 text-[10px] rounded text-slate-200 transition-all cursor-pointer"
+              >
+                ↗️ 右上
+              </button>
+              <button
+                onClick={() => setDebugSettings((p) => ({ ...p, lightX: 0.0, lightY: 0.0, lightZ: 1.0 }))}
+                className="px-2 py-1 bg-slate-800 hover:bg-amber-950/60 border border-slate-700 hover:border-amber-500/50 text-[10px] rounded text-slate-200 transition-all cursor-pointer"
+              >
+                ☀️ 正前 90°
+              </button>
+              <button
+                onClick={() => setDebugSettings((p) => ({ ...p, lightX: -0.85, lightY: 0.0, lightZ: 0.5 }))}
+                className="px-2 py-1 bg-slate-800 hover:bg-amber-950/60 border border-slate-700 hover:border-amber-500/50 text-[10px] rounded text-slate-200 transition-all cursor-pointer"
+              >
+                🌘 侧强光
+              </button>
+            </div>
+          </div>
+
+          {/* Section 2: Camera Heights & Pitch */}
+          <div className="space-y-2 bg-slate-900/60 p-2.5 rounded-lg border border-slate-800">
+            <div className="flex items-center justify-between text-cyan-300 font-bold">
+              <span className="flex items-center gap-1.5">
+                <Camera className="w-3.5 h-3.5 text-cyan-400" /> 3D 镜头参数 (Pitch / Height)
+              </span>
+            </div>
+
+            <div className="space-y-1.5 text-[11px]">
+              <div>
+                <div className="flex justify-between text-slate-400 mb-0.5">
+                  <span>俯仰角 Pitch (°):</span>
+                  <span className="text-cyan-300">{debugSettings.pitch}°</span>
+                </div>
+                <input
+                  type="range"
+                  min="0"
+                  max="65"
+                  step="1"
+                  value={debugSettings.pitch}
+                  onChange={(e) => setDebugSettings((p) => ({ ...p, pitch: parseInt(e.target.value) }))}
+                  className="w-full accent-cyan-400 cursor-pointer"
+                />
+              </div>
+
+              <div>
+                <div className="flex justify-between text-slate-400 mb-0.5">
+                  <span>偏航角 Yaw (°):</span>
+                  <span className="text-cyan-300">{debugSettings.yaw}°</span>
+                </div>
+                <input
+                  type="range"
+                  min="-45"
+                  max="45"
+                  step="1"
+                  value={debugSettings.yaw}
+                  onChange={(e) => setDebugSettings((p) => ({ ...p, yaw: parseInt(e.target.value) }))}
+                  className="w-full accent-cyan-400 cursor-pointer"
+                />
+              </div>
+
+              <div>
+                <div className="flex justify-between text-slate-400 mb-0.5">
+                  <span>镜头高度 Distance D:</span>
+                  <span className="text-cyan-300">{debugSettings.cameraD}</span>
+                </div>
+                <input
+                  type="range"
+                  min="300"
+                  max="2500"
+                  step="10"
+                  value={debugSettings.cameraD}
+                  onChange={(e) => setDebugSettings((p) => ({ ...p, cameraD: parseInt(e.target.value) }))}
+                  className="w-full accent-cyan-400 cursor-pointer"
+                />
+              </div>
+
+              <div>
+                <div className="flex justify-between text-slate-400 mb-0.5">
+                  <span>焦距 Focal Length:</span>
+                  <span className="text-cyan-300">{debugSettings.focalLength}</span>
+                </div>
+                <input
+                  type="range"
+                  min="500"
+                  max="1800"
+                  step="20"
+                  value={debugSettings.focalLength}
+                  onChange={(e) => setDebugSettings((p) => ({ ...p, focalLength: parseInt(e.target.value) }))}
+                  className="w-full accent-cyan-400 cursor-pointer"
+                />
+              </div>
+            </div>
+
+            {/* Camera Presets */}
+            <div className="grid grid-cols-2 gap-1 pt-1">
+              <button
+                onClick={() => setDebugSettings((p) => ({ ...p, pitch: 0, yaw: 0, cameraD: 1564 }))}
+                className="px-2 py-1 bg-slate-800 hover:bg-cyan-950/60 border border-slate-700 hover:border-cyan-500/50 text-[10px] rounded text-slate-200 transition-all cursor-pointer"
+              >
+                🎯 正俯视 90° (默认 1564)
+              </button>
+              <button
+                onClick={() => setDebugSettings((p) => ({ ...p, pitch: 22, yaw: 0, cameraD: 1564 }))}
+                className="px-2 py-1 bg-slate-800 hover:bg-cyan-950/60 border border-slate-700 hover:border-cyan-500/50 text-[10px] rounded text-slate-200 transition-all cursor-pointer"
+              >
+                🎮 RTS 倾角 22°
+              </button>
+              <button
+                onClick={() => setDebugSettings((p) => ({ ...p, pitch: 38, yaw: 0, cameraD: 1600 }))}
+                className="px-2 py-1 bg-slate-800 hover:bg-cyan-950/60 border border-slate-700 hover:border-cyan-500/50 text-[10px] rounded text-slate-200 transition-all cursor-pointer"
+              >
+                🎥 电影低视角 38°
+              </button>
+              <button
+                onClick={() => setDebugSettings((p) => ({ ...p, pitch: 0, yaw: 15, cameraD: 1564 }))}
+                className="px-2 py-1 bg-slate-800 hover:bg-cyan-950/60 border border-slate-700 hover:border-cyan-500/50 text-[10px] rounded text-slate-200 transition-all cursor-pointer"
+              >
+                🔄 偏航角 15°
+              </button>
+            </div>
+          </div>
+
+          {/* Section 3: Planet HUD Vertical Offsets */}
+          <div className="space-y-2 bg-slate-900/60 p-2.5 rounded-lg border border-slate-800">
+            <div className="flex items-center justify-between text-indigo-300 font-bold">
+              <span className="flex items-center gap-1.5">
+                <Target className="w-3.5 h-3.5 text-indigo-400" /> 星球 HUD 间距微调 (UI Y-Offsets)
+              </span>
+            </div>
+
+            <div className="space-y-1.5 text-[11px]">
+              <div>
+                <div className="flex justify-between text-slate-400 mb-0.5">
+                  <span>名字与血条间距 (Name Offset):</span>
+                  <span className="text-indigo-300">{debugSettings.nameOffsetY}px</span>
+                </div>
+                <input
+                  type="range"
+                  min="-25"
+                  max="-2"
+                  step="1"
+                  value={debugSettings.nameOffsetY}
+                  onChange={(e) => setDebugSettings((p) => ({ ...p, nameOffsetY: parseInt(e.target.value) }))}
+                  className="w-full accent-indigo-400 cursor-pointer"
+                />
+              </div>
+
+              <div>
+                <div className="flex justify-between text-slate-400 mb-0.5">
+                  <span>图标与名字间距 (Icon Offset):</span>
+                  <span className="text-indigo-300">{debugSettings.iconOffsetY}px</span>
+                </div>
+                <input
+                  type="range"
+                  min="-30"
+                  max="-5"
+                  step="1"
+                  value={debugSettings.iconOffsetY}
+                  onChange={(e) => setDebugSettings((p) => ({ ...p, iconOffsetY: parseInt(e.target.value) }))}
+                  className="w-full accent-indigo-400 cursor-pointer"
+                />
+              </div>
+            </div>
+          </div>
+
+          {/* Reset Action */}
+          <button
+            onClick={() => setDebugSettings({ ...defaultDebugSettings, f3Open: true })}
+            className="w-full py-1.5 bg-slate-800 hover:bg-rose-950/60 border border-slate-700 hover:border-rose-500/50 text-rose-300 hover:text-rose-200 text-xs font-bold rounded-lg transition-all flex items-center justify-center gap-1.5 cursor-pointer"
+          >
+            <RotateCcw className="w-3.5 h-3.5" />
+            <span>恢复默认设置 (Reset Defaults)</span>
+          </button>
         </div>
       )}
     </div>

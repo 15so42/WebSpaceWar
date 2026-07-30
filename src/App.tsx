@@ -3,8 +3,7 @@ import { GameState, LobbyInfo, ServerMessage, MessageType, CommandType, ShipType
 import LobbyScreen from './components/LobbyScreen';
 import SpaceBattlefield from './components/SpaceBattlefield';
 import CardDeck from './components/CardDeck';
-import GameLogs from './components/GameLogs';
-import { Play, LogOut, Radio, RefreshCw, Sparkles, LogIn, AlertCircle } from 'lucide-react';
+import { Play, LogOut, RefreshCw, Sparkles, LogIn, AlertCircle } from 'lucide-react';
 
 const PROTOCOL_VERSION = '1.0.0';
 
@@ -417,47 +416,6 @@ export default function App() {
                 </div>
               </div>
             </div>
-          </div>
-
-          {/* Floating HUD: Top Right Fleet Presence List */}
-          <div className="absolute top-4 right-4 z-10 p-3.5 bg-[#030614]/90 border border-indigo-500/40 rounded-2xl shadow-2xl shadow-black/80 backdrop-blur-md w-[220px] pointer-events-auto max-h-[250px] overflow-y-auto scrollbar-none">
-            <h3 className="text-[10px] font-black uppercase tracking-widest text-slate-300 pb-2 border-b border-[#14204c] mb-2 flex items-center gap-1.5">
-              <Radio className="w-3.5 h-3.5 text-indigo-400" />
-              星战指挥态势
-            </h3>
-            <div className="space-y-1.5">
-              {Object.values(roomState.players).map((p: any) => (
-                <div
-                  key={p.id}
-                  className={`p-2 bg-[#070b20]/60 border ${
-                    p.id === playerId ? 'border-indigo-500/80' : 'border-[#14224c]'
-                  } rounded-xl flex flex-col gap-0.5`}
-                >
-                  <div className="flex justify-between items-center text-[10px]">
-                    <div className="flex items-center gap-1.5">
-                      <div className="w-2.5 h-2.5 rounded-full shadow-inner" style={{ backgroundColor: p.factionId }} />
-                      <span className="font-bold text-slate-200 truncate max-w-[95px]">
-                        {p.name} {p.id === playerId && '(你)'}
-                      </span>
-                    </div>
-                    <span className={`font-mono font-black ${p.isAlive ? 'text-emerald-400' : 'text-slate-500'}`}>
-                      {p.isAlive ? `${Math.floor(p.homePlanetHp)}%` : '💀 沦陷'}
-                    </span>
-                  </div>
-                  {p.isAlive && (
-                    <div className="flex justify-between text-[8px] text-slate-500 font-mono mt-0.5">
-                      <span>💎 {Math.floor(p.minerals)}</span>
-                      <span>🧬 {Math.floor(p.techPoints)}</span>
-                    </div>
-                  )}
-                </div>
-              ))}
-            </div>
-          </div>
-
-          {/* Floating HUD: Bottom Left Live Tactical Log Console */}
-          <div className="absolute bottom-4 left-4 z-10 pointer-events-auto w-[270px] hidden md:block max-h-[170px]">
-            <GameLogs logs={roomState.logs} />
           </div>
 
           {/* Floating HUD: Bottom Right Active Continuous Card Buff Zone */}

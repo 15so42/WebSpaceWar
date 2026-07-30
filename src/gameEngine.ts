@@ -20,8 +20,8 @@ export function generateId(prefix: string): string {
 }
 
 // Visual layout dimension parameters
-export const MAP_WIDTH = 1200;
-export const MAP_HEIGHT = 800;
+export const MAP_WIDTH = 3000;
+export const MAP_HEIGHT = 2000;
 
 // Ship configuration database
 export const SHIP_CONFIGS = {
@@ -76,22 +76,62 @@ export function createGame(
     '#a855f7', // Purple (Player 5)
   ];
 
-  // Map out planet locations symmetrically for balanced RTS battlefield lanes
-  const playerHomePositions = [
-    { x: 180, y: 400 },  // Player 1 (Left - Sapphire Blue base)
-    { x: 1020, y: 400 }, // Player 2 (Right - Crimson Red base)
-    { x: 600, y: 150 },  // Player 3 (Top - Emerald Green base)
-    { x: 600, y: 650 },  // Player 4 (Bottom - Rose Pink base)
+  // Map out planet locations asymmetrically for an organic, non-symmetrical strategic RTS battlefield layout
+  // 1. Procedural randomized planet placement with minimum spacing constraint
+  const positions: { x: number; y: number }[] = [];
+  const minDistance = 500; // Expanded spacing by another 2x!
+  const maxAttempts = 3000;
+  // Generate home planets for each player, plus 8 neutral/resource strategic nodes
+  const totalNumPlanets = playersList.length + 8;
+
+  for (let i = 0; i < totalNumPlanets; i++) {
+    let found = false;
+    let attempts = 0;
+    while (!found && attempts < maxAttempts) {
+      attempts++;
+      // Edge margins: 150 to MAP_WIDTH-150, 150 to MAP_HEIGHT-150
+      const rx = 150 + Math.random() * (MAP_WIDTH - 300);
+      const ry = 150 + Math.random() * (MAP_HEIGHT - 300);
+
+      let tooClose = false;
+      for (const pos of positions) {
+        const dx = pos.x - rx;
+        const dy = pos.y - ry;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist < minDistance) {
+          tooClose = true;
+          break;
+        }
+      }
+
+      if (!tooClose) {
+        positions.push({ x: rx, y: ry });
+        found = true;
+      }
+    }
+    if (!found) {
+      // Fallback with looser spacing constraint if congested
+      const rx = 150 + Math.random() * (MAP_WIDTH - 300);
+      const ry = 150 + Math.random() * (MAP_HEIGHT - 300);
+      positions.push({ x: rx, y: ry });
+    }
+  }
+
+  // Shuffle positions to randomly distribute home bases and neutral nodes
+  const shuffledPositions = [...positions].sort(() => Math.random() - 0.5);
+
+  // 2. Setup names pool
+  const prefixPool = [
+    '奥瑞恩', '奥德赛', '泰坦', '塞拉菲姆', '柯罗诺斯', '赫尔墨斯', '索拉里斯',
+    '天狼星', '织女星', '仙女座', '猎户座', '普罗米修斯', '美杜莎', '潘多拉',
+    '波塞冬', '阿瑞斯', '雅典娜', '阿波罗', '赫拉', '宙斯', '雷神'
   ];
+  const shuffledPrefixes = [...prefixPool].sort(() => Math.random() - 0.5);
 
-  const activeHomeIndices = new Set<number>();
-
-  // Create Players and their Home Planets
+  // Create Players and their Home Planets (assigned to first shuffled positions)
   playersList.forEach((p, idx) => {
-    const homeIndex = idx % playerHomePositions.length;
-    activeHomeIndices.add(homeIndex);
     const factionId = colors[idx % colors.length];
-    const homePos = playerHomePositions[homeIndex];
+    const homePos = shuffledPositions[idx];
     const homePlanetId = generateId('planet_home');
 
     // Draw initial 5 cards (restricted to Stage 1 cards at start, since techPoints = 0)
@@ -134,42 +174,77 @@ export function createGame(
     };
   });
 
-  // Generate generic resource and neutral planets
-  const neutralPlanetsConfig = [
-    { name: '奥瑞恩中心晶矿', x: 600, y: 400, type: PlanetType.RESOURCE, subType: PlanetSubType.MINERAL },
-    { name: '埃尔达矿星', x: 390, y: 230, type: PlanetType.RESOURCE, subType: PlanetSubType.MINERAL },
-    { name: '赛瑞斯科技星', x: 810, y: 570, type: PlanetType.RESOURCE, subType: PlanetSubType.TECH },
-    { name: '奥德赛中立星', x: 390, y: 570, type: PlanetType.NEUTRAL },
-    { name: '泰坦中立星', x: 810, y: 230, type: PlanetType.NEUTRAL },
-    { name: '左翼前哨哨所', x: 390, y: 400, type: PlanetType.NEUTRAL },
-    { name: '右翼前哨哨所', x: 810, y: 400, type: PlanetType.NEUTRAL },
+  // Create 8 neutral/strategic planets distributed on the remaining shuffled positions
+  const neutralNodeTypes = [
+    { type: PlanetType.RESOURCE, subType: PlanetSubType.MINERAL, nameSuffix: '富矿星' },
+    { type: PlanetType.RESOURCE, subType: PlanetSubType.MINERAL, nameSuffix: '碎星矿区' },
+    { type: PlanetType.RESOURCE, subType: PlanetSubType.TECH, nameSuffix: '工业重构星' },
+    { type: PlanetType.RESOURCE, subType: PlanetSubType.TECH, nameSuffix: '科研枢纽' },
+    { type: PlanetType.SPECIAL, subType: PlanetSubType.SHIELD, nameSuffix: '虚空防护星' },
+    { type: PlanetType.SPECIAL, subType: PlanetSubType.HEAL, nameSuffix: '生命温床' },
+    { type: PlanetType.NEUTRAL, subType: undefined, nameSuffix: '前哨站' },
+    { type: PlanetType.NEUTRAL, subType: undefined, nameSuffix: '中转空天站' },
   ];
 
-  // Fill in vacant home slots with beautiful strategic special hubs
-  if (!activeHomeIndices.has(2)) {
-    neutralPlanetsConfig.push({ name: '虚空护盾发生器', x: 600, y: 150, type: PlanetType.SPECIAL, subType: PlanetSubType.SHIELD });
-  }
-  if (!activeHomeIndices.has(3)) {
-    neutralPlanetsConfig.push({ name: '塞拉菲姆温床', x: 600, y: 650, type: PlanetType.SPECIAL, subType: PlanetSubType.HEAL });
-  }
-
-  neutralPlanetsConfig.forEach((pConf, idx) => {
+  neutralNodeTypes.forEach((node, idx) => {
+    const posIdx = playersList.length + idx;
+    const pos = shuffledPositions[posIdx] || { x: 500, y: 400 };
     const planetId = generateId('planet_neu');
+    const prefix = shuffledPrefixes[idx % shuffledPrefixes.length] || '未知';
+
     planets[planetId] = {
       id: planetId,
-      name: pConf.name,
-      x: pConf.x,
-      y: pConf.y,
-      type: pConf.type,
-      subType: pConf.subType,
+      name: `${prefix}${node.nameSuffix}`,
+      x: pos.x,
+      y: pos.y,
+      type: node.type,
+      subType: node.subType,
       ownerId: null,
-      hp: 0,
-      maxHp: 0,
+      hp: 100, // Initialized fully to 100% full as requested
+      maxHp: 100,
       captureProgress: 0,
       capturingFactionId: null,
       isContested: false,
       debuffs: [],
     };
+  });
+
+  // Pre-spawn initial defensive and offensive fleets to make the battlefield immediately feel alive and dynamic as requested
+  const spawnInitialShip = (
+    ownerId: string,
+    planetId: string,
+    type: ShipType,
+    stateType: ShipState = ShipState.ORBIT
+  ) => {
+    const shipId = generateId(`ship_init_${type.toLowerCase()}`);
+    const pl = planets[planetId];
+    if (!pl) return;
+    ships[shipId] = {
+      id: shipId,
+      type,
+      ownerId,
+      hp: SHIP_CONFIGS[type].hp,
+      maxHp: SHIP_CONFIGS[type].hp,
+      attack: SHIP_CONFIGS[type].attack,
+      shield: SHIP_CONFIGS[type].shield,
+      maxShield: SHIP_CONFIGS[type].shield,
+      state: stateType,
+      planetId,
+      targetPlanetId: null,
+      x: pl.x + (Math.random() * 40 - 20),
+      y: pl.y + (Math.random() * 40 - 20),
+      speed: SHIP_CONFIGS[type].speed,
+      travelProgress: 0,
+      spyDisguisedAs: null,
+    };
+  };
+
+  // Spawn fleets on players' home planets - each starts with exactly ONE small exploration ship
+  Object.keys(players).forEach((pId) => {
+    const homePl = Object.values(planets).find(pl => pl.type === PlanetType.HOME && pl.ownerId === pId);
+    if (homePl) {
+      spawnInitialShip(pId, homePl.id, ShipType.SCOUT);
+    }
   });
 
   return {
@@ -472,12 +547,28 @@ export function dispatchFleet(
     throw new Error(`无可支配的空闲飞船 (请求: ${count}, 空闲: ${idleShips.length})`);
   }
 
-  // Dispatched ships change to moving state
+  // Dispatched ships change to moving state, preserving current exact 3D position for direct orbital breakout
+  const nowMs = Date.now();
   const shipsToDispatch = idleShips.slice(0, count);
   shipsToDispatch.forEach((sh) => {
+    if (srcPlanet) {
+      const orbPos = computeShipOrbitPosition(sh, srcPlanet, nowMs);
+      sh.startX = orbPos.x;
+      sh.startY = orbPos.y;
+      sh.startZ = orbPos.z;
+      sh.headingAngle = orbPos.headingAngle;
+      sh.x = orbPos.x;
+      sh.y = orbPos.y;
+      sh.z = orbPos.z;
+    } else {
+      sh.startX = sh.x;
+      sh.startY = sh.y;
+      sh.startZ = sh.z || 0;
+    }
     sh.state = ShipState.MOVING;
     sh.targetPlanetId = targetPlanetId;
     sh.travelProgress = 0;
+    sh.lastUpdateMs = nowMs;
   });
 
   state.logs.unshift(
@@ -487,41 +578,193 @@ export function dispatchFleet(
   return state;
 }
 
+// Seeded random for deterministic planet radius calculation matching visual renderer
+function seededRandom(seedStr: string) {
+  let hash = 0;
+  for (let i = 0; i < seedStr.length; i++) {
+    hash = seedStr.charCodeAt(i) + ((hash << 5) - hash);
+  }
+  return function () {
+    const x = Math.sin(hash++) * 10000;
+    return x - Math.floor(x);
+  };
+}
+
+export function getPlanetRadius(planet: Planet): number {
+  const rand = seededRandom(planet.id + '_style');
+  return Math.floor((22 + rand() * 22) * 2); // 44 to 88 pixels matching getPlanetStyleConfig
+}
+
+// Compute deterministic 3D orbit parameters per ship ID
+export interface OrbitParams {
+  orbitRad: number;
+  nodeAngle: number;
+  incAngle: number;
+  dir: number;
+  orbitSpeed: number;
+}
+
+export function getShipOrbitParams(sh: Ship, planet: Planet): OrbitParams {
+  let hash = 0;
+  for (let i = 0; i < sh.id.length; i++) {
+    hash = (hash * 31 + sh.id.charCodeAt(i)) & 0x7fffffff;
+  }
+
+  const baseSpeed = sh.type === ShipType.SCOUT ? 0.0016 : sh.type === ShipType.SPY ? 0.0013 : sh.type === ShipType.FRIGATE ? 0.0009 : 0.0005;
+  const orbitSpeed = baseSpeed * (0.85 + (hash % 4) * 0.12);
+  const dir = (hash % 2 === 0) ? 1 : -1;
+
+  // Node angle (longitude of ascending node): golden ratio distribution 0 to 2PI
+  const nodeAngle = ((hash % 100) / 100) * Math.PI * 2;
+
+  // Inclination angle: steep, varied 3D orbital planes (-65° to +65°)
+  const incDegPattern = [55, -40, 65, -30, 45, -55, 35, -65];
+  const incDeg = incDegPattern[hash % incDegPattern.length];
+  const incAngle = incDeg * (Math.PI / 180);
+
+  const baseOffset = sh.type === ShipType.SCOUT ? 22 : sh.type === ShipType.FRIGATE ? 34 : sh.type === ShipType.DREADNOUGHT ? 48 : 18;
+  const staggerOffset = (hash % 5) * 6 - 12;
+  const pRadius = getPlanetRadius(planet);
+  const orbitRad = Math.max(pRadius + 14, pRadius + baseOffset + staggerOffset);
+
+  return { orbitRad, nodeAngle, incAngle, dir, orbitSpeed };
+}
+
+export function getOrbitPosFromPhase(planet: Planet, params: OrbitParams, phi: number) {
+  const u = Math.cos(phi) * params.orbitRad;
+  const v = Math.sin(phi) * params.orbitRad;
+
+  const du = -params.dir * Math.sin(phi) * params.orbitRad;
+  const dv = params.dir * Math.cos(phi) * params.orbitRad;
+
+  // 1) Rotate by inclination (incAngle) around Y-axis
+  const x1 = u * Math.cos(params.incAngle);
+  const y1 = v;
+  const z1 = -u * Math.sin(params.incAngle);
+
+  const vx1 = du * Math.cos(params.incAngle);
+  const vy1 = dv;
+  const vz1 = -du * Math.sin(params.incAngle);
+
+  // 2) Rotate by node longitude (nodeAngle) around Z-axis
+  const x2 = x1 * Math.cos(params.nodeAngle) - y1 * Math.sin(params.nodeAngle);
+  const y2 = x1 * Math.sin(params.nodeAngle) + y1 * Math.cos(params.nodeAngle);
+  const z2 = z1;
+
+  const vx2 = vx1 * Math.cos(params.nodeAngle) - vy1 * Math.sin(params.nodeAngle);
+  const vy2 = vx1 * Math.sin(params.nodeAngle) + vy1 * Math.cos(params.nodeAngle);
+  const vz2 = vz1;
+
+  return {
+    x: planet.x + x2,
+    y: planet.y + y2,
+    z: z2,
+    velo3D: { x: vx2, y: vy2, z: vz2 },
+    headingAngle: Math.atan2(vy2, vx2),
+  };
+}
+
+export function getOrbitEntryAngle(sx: number, sy: number, sz: number, planet: Planet, params: OrbitParams): number {
+  const px = sx - planet.x;
+  const py = sy - planet.y;
+  const pz = sz - 0;
+
+  // Un-rotate nodeAngle around Z
+  const x1 = px * Math.cos(-params.nodeAngle) - py * Math.sin(-params.nodeAngle);
+  const y1 = px * Math.sin(-params.nodeAngle) + py * Math.cos(-params.nodeAngle);
+  const z1 = pz;
+
+  // Un-rotate incAngle around Y
+  const u_local = x1 * Math.cos(-params.incAngle) - z1 * Math.sin(-params.incAngle);
+  const v_local = y1;
+
+  return Math.atan2(v_local, u_local);
+}
+
+export function computeShipOrbitPosition(sh: Ship, planet: Planet, nowMs: number) {
+  const params = getShipOrbitParams(sh, planet);
+  if (sh.orbitPhaseStart === undefined || sh.orbitTimeStart === undefined) {
+    let hash = 0;
+    for (let i = 0; i < sh.id.length; i++) {
+      hash = (hash * 31 + sh.id.charCodeAt(i)) & 0x7fffffff;
+    }
+    const startPhase = ((hash % 360) * Math.PI) / 180;
+    sh.orbitPhaseStart = params.dir * startPhase;
+    sh.orbitTimeStart = nowMs;
+  }
+
+  const elapsedMs = nowMs - sh.orbitTimeStart;
+  const currentPhase = sh.orbitPhaseStart + params.dir * params.orbitSpeed * elapsedMs;
+  return getOrbitPosFromPhase(planet, params, currentPhase);
+}
+
 // Run a full simulation frame
 export function tickGame(state: GameState, dt: number): GameState {
   if (state.gameOver) return state;
 
-  // 1. Update ship positions and travel status
+  const nowMs = Date.now();
+
+  // 1. Update ship positions, travel status, steering physics, and orbital movement
   Object.values(state.ships).forEach((sh) => {
     if (sh.state === ShipState.MOVING && sh.targetPlanetId) {
       const srcPl = state.planets[sh.planetId];
       const tgtPl = state.planets[sh.targetPlanetId];
 
-      if (srcPl && tgtPl) {
-        // Calculate coordinate step
-        const dx = tgtPl.x - srcPl.x;
-        const dy = tgtPl.y - srcPl.y;
-        const dist = Math.sqrt(dx * dx + dy * dy);
+      if (tgtPl) {
+        let sx = sh.startX;
+        let sy = sh.startY;
+        let sz = sh.startZ;
+
+        if (sx === undefined || sy === undefined || sz === undefined) {
+          if (srcPl) {
+            const orbPos = computeShipOrbitPosition(sh, srcPl, nowMs);
+            sx = orbPos.x;
+            sy = orbPos.y;
+            sz = orbPos.z;
+            sh.startX = sx;
+            sh.startY = sy;
+            sh.startZ = sz;
+          } else {
+            sx = sh.x;
+            sy = sh.y;
+            sz = sh.z || 0;
+          }
+        }
+
+        const params = getShipOrbitParams(sh, tgtPl);
+        const entryAngle = getOrbitEntryAngle(sx, sy, sz, tgtPl, params);
+        const entryPos = getOrbitPosFromPhase(tgtPl, params, entryAngle);
+
+        const dx = entryPos.x - sx;
+        const dy = entryPos.y - sy;
+        const dz = entryPos.z - sz;
+        const dist = Math.hypot(dx, dy, dz);
 
         if (dist > 0) {
-          const speed = sh.speed;
-          sh.travelProgress += (speed * dt) / dist;
+          sh.travelProgress += (sh.speed * dt) / dist;
+          sh.lastUpdateMs = nowMs;
 
           if (sh.travelProgress >= 1.0) {
-            // Arrived!
+            // Arrived! Join orbit seamlessly
             sh.planetId = sh.targetPlanetId;
             sh.targetPlanetId = null;
             sh.travelProgress = 0;
-            sh.x = tgtPl.x;
-            sh.y = tgtPl.y;
+            sh.startX = undefined;
+            sh.startY = undefined;
+            sh.startZ = undefined;
+
+            sh.orbitPhaseStart = entryAngle;
+            sh.orbitTimeStart = nowMs;
+            sh.x = entryPos.x;
+            sh.y = entryPos.y;
+            sh.z = entryPos.z;
+            sh.headingAngle = entryPos.headingAngle;
 
             // Determine arrived state
             if (sh.type === ShipType.SPY) {
               sh.state = ShipState.ORBIT;
-              // If target planet belongs to an enemy, spy disguised as the planet owner
               if (tgtPl.ownerId && tgtPl.ownerId !== sh.ownerId) {
                 sh.spyDisguisedAs = tgtPl.ownerId;
-                // Add spy debuff to the target planet if not already exists
                 const alreadyDebuffed = tgtPl.debuffs.some((d) => d.shipId === sh.id);
                 if (!alreadyDebuffed) {
                   tgtPl.debuffs.push({
@@ -548,38 +791,52 @@ export function tickGame(state: GameState, dt: number): GameState {
               } else {
                 sh.state = ShipState.ORBIT;
               }
+            } else {
+              sh.state = ShipState.ORBIT;
             }
           } else {
-            // Interpolate coordinates
-            sh.x = srcPl.x + dx * sh.travelProgress;
-            sh.y = srcPl.y + dy * sh.travelProgress;
+            // Interpolate coordinates in 3D directly to orbit insertion point
+            const p = sh.travelProgress;
+            sh.x = sx + dx * p;
+            sh.y = sy + dy * p;
+            sh.z = sz + dz * p + Math.sin(Math.PI * p) * Math.min(30, dist * 0.1);
+
+            // Facing angle steering: turn smoothly from current heading toward target angle with max turn rate
+            const approachAngle = Math.atan2(dy, dx);
+            let desiredAngle = approachAngle;
+            if (p >= 0.7) {
+              const blend = (p - 0.7) / 0.3;
+              let diff = entryPos.headingAngle - approachAngle;
+              while (diff > Math.PI) diff -= Math.PI * 2;
+              while (diff < -Math.PI) diff += Math.PI * 2;
+              desiredAngle = approachAngle + diff * blend;
+            }
+
+            const currentHeading = sh.headingAngle ?? desiredAngle;
+            let angleDiff = desiredAngle - currentHeading;
+            while (angleDiff > Math.PI) angleDiff -= Math.PI * 2;
+            while (angleDiff < -Math.PI) angleDiff += Math.PI * 2;
+
+            const turnRate = sh.type === ShipType.SCOUT ? 3.5 : sh.type === ShipType.DREADNOUGHT ? 1.5 : 2.5;
+            const maxTurn = turnRate * dt;
+
+            if (Math.abs(angleDiff) <= maxTurn) {
+              sh.headingAngle = desiredAngle;
+            } else {
+              sh.headingAngle = currentHeading + Math.sign(angleDiff) * maxTurn;
+            }
           }
         }
       }
     } else {
-      // Circular slow orbit rotation for visual pleasure
+      // Deterministic 3D orbit rotation
       const pl = state.planets[sh.planetId];
       if (pl) {
-        // Orbit radius based on ship type to avoid overlapping
-        let orbitRadius = 45;
-        let orbitSpeed = 1.0;
-        if (sh.type === ShipType.SCOUT) {
-          orbitRadius = 35;
-          orbitSpeed = 1.4;
-        } else if (sh.type === ShipType.DREADNOUGHT) {
-          orbitRadius = 55;
-          orbitSpeed = 0.8;
-        } else if (sh.type === ShipType.SPY) {
-          orbitRadius = 40;
-          orbitSpeed = 1.2;
-        } else if (sh.type === ShipType.FRIGATE) {
-          orbitRadius = 30;
-          orbitSpeed = 0.5;
-        }
-
-        const angle = ((Date.now() / 1000) * orbitSpeed + Number(sh.id.substring(sh.id.length - 2)) * 17) % (Math.PI * 2);
-        sh.x = pl.x + Math.cos(angle) * orbitRadius;
-        sh.y = pl.y + Math.sin(angle) * orbitRadius;
+        const orbPos = computeShipOrbitPosition(sh, pl, nowMs);
+        sh.x = orbPos.x;
+        sh.y = orbPos.y;
+        sh.z = orbPos.z;
+        sh.headingAngle = orbPos.headingAngle;
       }
     }
   });

@@ -109,6 +109,15 @@ export interface Ship {
   targetPlanetId: PlanetId | null; // destination if moving
   x: number; // visual x
   y: number; // visual y
+  z?: number; // visual z
+  startX?: number; // departure x origin when dispatched
+  startY?: number; // departure y origin when dispatched
+  startZ?: number; // departure z origin when dispatched
+  lastUpdateMs?: number; // timestamp when travelProgress/position was last updated
+  headingAngle?: number; // facing direction angle
+  orbitPhase?: number; // legacy orbital phase angle
+  orbitPhaseStart?: number; // initial orbital phase angle
+  orbitTimeStart?: number; // timestamp when orbitPhaseStart was recorded
   speed: number;
   travelProgress: number; // 0 to 1 (for interpolation if moving)
   spyDisguisedAs: PlayerId | null; // client view uses this if spy is disguised
